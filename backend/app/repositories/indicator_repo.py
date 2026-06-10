@@ -46,6 +46,14 @@ class IndicatorRepository:
                 "ichimoku_kijun": stmt.excluded.ichimoku_kijun,
                 "ichimoku_senkou_a": stmt.excluded.ichimoku_senkou_a,
                 "ichimoku_senkou_b": stmt.excluded.ichimoku_senkou_b,
+                "stoch_k": stmt.excluded.stoch_k,
+                "stoch_d": stmt.excluded.stoch_d,
+                "mfi": stmt.excluded.mfi,
+                "cci": stmt.excluded.cci,
+                "williams_r": stmt.excluded.williams_r,
+                "obv": stmt.excluded.obv,
+                "supertrend": stmt.excluded.supertrend,
+                "supertrend_dir": stmt.excluded.supertrend_dir,
             }
         )
         self.db.execute(upsert_stmt, indicator_data)

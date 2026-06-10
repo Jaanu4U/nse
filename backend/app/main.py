@@ -4,7 +4,7 @@ from app.config import settings
 from app.database import engine
 from app.db_init import init_database
 from app.tasks.scheduler import start_scheduler
-from app.routers import auth, stocks, screener, portfolio, metrics, fii_dii, insider_trading, options_chain
+from app.routers import auth, stocks, screener, portfolio, metrics, fii_dii, insider_trading, options_chain, market
 from app.utils.rate_limit import RateLimitMiddleware
 from app.utils.metrics import MetricsMiddleware
 from contextlib import asynccontextmanager
@@ -70,6 +70,7 @@ app.include_router(metrics.router, prefix=settings.API_V1_STR)
 app.include_router(fii_dii.router, prefix=settings.API_V1_STR)
 app.include_router(insider_trading.router, prefix=settings.API_V1_STR)
 app.include_router(options_chain.router, prefix=settings.API_V1_STR)
+app.include_router(market.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def read_root():

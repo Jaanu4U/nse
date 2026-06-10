@@ -1,64 +1,132 @@
 import datetime
 import random
 import logging
+import requests
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 from app.models.models import FIIDIIActivity
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+NSE_FIIDII_URL = "https://www.nseindia.com/api/fiidiiTradeReact"
+NSE_HOME = "https://www.nseindia.com"
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/reports/fii-dii",
+}
+
 
 class FIIDIIAnalyticsService:
     def __init__(self, db: Session):
         self.db = db
 
+    def _fetch_real_nse(self) -> Optional[Dict[str, Any]]:
+        """
+        Fetch the latest real FII/DII cash trading activity from the NSE public API.
+        Returns {'date': date, 'fii_cash': float, 'dii_cash': float} or None on failure.
+        """
+        try:
+            s = requests.Session()
+            # Prime cookies by hitting the homepage first (NSE blocks cold API calls).
+            s.get(NSE_HOME, headers=NSE_HEADERS, timeout=10)
+            r = s.get(NSE_FIIDII_URL, headers=NSE_HEADERS, timeout=10)
+            if r.status_code != 200:
+                logger.warning(f"NSE FII/DII API returned {r.status_code}")
+                return None
+            data = r.json()
+            fii_cash = dii_cash = None
+            report_date = None
+            for row in data:
+                cat = (row.get("category") or "").upper()
+                net = row.get("netValue")
+                if net is None:
+                    continue
+                net = float(str(net).replace(",", ""))
+                if "DII" in cat:
+                    dii_cash = net
+                elif "FII" in cat or "FPI" in cat:
+                    fii_cash = net
+                if report_date is None and row.get("date"):
+                    try:
+                        report_date = datetime.datetime.strptime(row["date"], "%d-%b-%Y").date()
+                    except ValueError:
+                        pass
+            if fii_cash is None and dii_cash is None:
+                return None
+            return {
+                "date": report_date or datetime.date.today(),
+                "fii_cash": fii_cash,
+                "dii_cash": dii_cash,
+            }
+        except Exception as e:
+            logger.warning(f"Real NSE FII/DII fetch failed: {e}")
+            return None
+
     def sync_fii_dii_data(self) -> int:
         """
-        Download daily FII/DII net trading activity data.
-        Falls back to generating realistic mock data if scraping is blocked or fails.
+        Download daily FII/DII net trading activity data. Uses the real NSE cash
+        figures when reachable; falls back to modeled data if scraping is blocked.
+        Derivatives breakdown is always modeled (NSE cash API has no F&O split).
         """
         logger.info("Syncing FII/DII activity data...")
         today = datetime.date.today()
-        
-        # Check if we already have data for today
-        existing = self.db.query(FIIDIIActivity).filter(FIIDIIActivity.timestamp == today).first()
-        if existing:
-            logger.info("FII/DII data for today already exists. Skipping sync.")
-            return 0
 
-        # Simulating/Scraping FII/DII activity flows (values in Crores INR)
-        # In a real environment, this crawls NSE/BSE reports or moneycontrol pages.
-        # Here we seed data for today and backfill the last 30 days if empty.
+        # Try real NSE data first.
+        real = self._fetch_real_nse()
         count = 0
         try:
-            self._seed_activity_on_date(today)
-            count += 1
-            
-            # If database has fewer than 10 rows, backfill 30 days of historical data
+            if real:
+                rdate = real["date"]
+                existing = self.db.query(FIIDIIActivity).filter(FIIDIIActivity.timestamp == rdate).first()
+                if existing:
+                    # Refresh the real cash figures on the existing row.
+                    if real["fii_cash"] is not None:
+                        existing.fii_cash_net = round(real["fii_cash"], 2)
+                    if real["dii_cash"] is not None:
+                        existing.dii_cash_net = round(real["dii_cash"], 2)
+                else:
+                    self._seed_activity_on_date(rdate, fii_cash=real["fii_cash"], dii_cash=real["dii_cash"])
+                    count += 1
+            else:
+                existing = self.db.query(FIIDIIActivity).filter(FIIDIIActivity.timestamp == today).first()
+                if not existing:
+                    self._seed_activity_on_date(today)
+                    count += 1
+
+            # If database has fewer than 10 rows, backfill ~45 days of modeled history
+            # (real NSE API only exposes the latest session).
             total_records = self.db.query(func.count(FIIDIIActivity.timestamp)).scalar()
             if total_records < 10:
                 logger.info("Backfilling FII/DII historical flow data...")
                 for i in range(1, 45):
                     date = today - datetime.timedelta(days=i)
-                    # Skip weekends
-                    if date.weekday() >= 5:
+                    if date.weekday() >= 5:  # Skip weekends
                         continue
                     self._seed_activity_on_date(date)
                     count += 1
-                    
+
             self.db.commit()
-            logger.info(f"FII/DII activity sync complete. Ingested {count} records.")
+            logger.info(f"FII/DII activity sync complete. Ingested/updated {count} records "
+                        f"({'real NSE' if real else 'modeled'} latest).")
         except Exception as e:
             self.db.rollback()
             logger.error(f"Error during FII/DII activity sync: {e}")
-            
+
         return count
 
-    def _seed_activity_on_date(self, date: datetime.date):
-        # Generate realistic net inflows/outflows in Crores INR
-        # Market trends can be slightly modeled (e.g. FII selling, DII buying)
-        fii_cash = random.uniform(-2500, 1500)
-        dii_cash = random.uniform(-1000, 2800)
+    def _seed_activity_on_date(self, date: datetime.date,
+                               fii_cash: Optional[float] = None,
+                               dii_cash: Optional[float] = None):
+        # Use real cash figures when provided, otherwise model realistic net flows (Crores INR).
+        if fii_cash is None:
+            fii_cash = random.uniform(-2500, 1500)
+        if dii_cash is None:
+            dii_cash = random.uniform(-1000, 2800)
+        # Derivatives breakdown is always modeled (no public daily cash-API split).
         fii_idx_fut = random.uniform(-800, 600)
         fii_idx_opt = random.uniform(-5000, 4000)
         fii_stk_fut = random.uniform(-1200, 1000)

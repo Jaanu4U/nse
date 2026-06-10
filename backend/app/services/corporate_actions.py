@@ -74,9 +74,12 @@ class CorporateActionsService:
             return True
 
         if action.action_type == "SPLIT" or action.action_type == "BONUS":
-            # Ratio Split: e.g. ratio_from = 10, ratio_to = 1 (means old shares 1 split to 10)
-            # Price adjustment factor: ratio_to / ratio_from (e.g. 1 / 10 = 0.1)
-            # Volume adjustment factor: ratio_from / ratio_to (e.g. 10 / 1 = 10.0)
+            # Ratio semantics: ratio_from = OLD share count, ratio_to = NEW share count.
+            # e.g. a 1:2 split/bonus => ratio_from = 1, ratio_to = 2 (1 old share becomes 2 new shares).
+            # Value is conserved: old_qty * old_price == new_qty * new_price.
+            # To make HISTORICAL prices comparable with post-event prices:
+            #   price_factor = ratio_from / ratio_to  (1/2 = 0.5  -> historical prices scaled down)
+            #   vol_factor   = ratio_to / ratio_from  (2/1 = 2.0  -> historical volumes scaled up)
             r_from = float(action.ratio_from)
             r_to = float(action.ratio_to)
             
@@ -84,8 +87,8 @@ class CorporateActionsService:
                 logger.error(f"Invalid split ratio values for action {action.id}: {r_from} -> {r_to}")
                 return False
                 
-            price_factor = r_to / r_from
-            vol_factor = r_from / r_to
+            price_factor = r_from / r_to
+            vol_factor = r_to / r_from
             
             logger.info(f"Applying split adjustment factor {price_factor} to {len(historical_prices)} rows.")
             for price in historical_prices:
@@ -93,7 +96,8 @@ class CorporateActionsService:
                 price.high = float(price.high) * price_factor
                 price.low = float(price.low) * price_factor
                 price.close = float(price.close) * price_factor
-                price.adj_close = float(price.adj_close) * price_factor
+                if price.adj_close is not None:
+                    price.adj_close = float(price.adj_close) * price_factor
                 price.volume = int(price.volume * vol_factor)
                 self.db.add(price)
 
@@ -122,8 +126,9 @@ class CorporateActionsService:
 
             logger.info(f"Applying dividend adjustment factor {factor} to {len(historical_prices)} rows.")
             for price in historical_prices:
-                price.adj_close = float(price.adj_close) * factor
-                self.db.add(price)
+                if price.adj_close is not None:
+                    price.adj_close = float(price.adj_close) * factor
+                    self.db.add(price)
                 
         else:
             logger.warning(f"Unknown corporate action type: {action.action_type}")

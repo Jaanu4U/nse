@@ -6,10 +6,17 @@ from app.repositories.user_repo import UserRepository
 from app.utils.security import verify_password, create_access_token, decode_access_token
 from pydantic import BaseModel, EmailStr
 from typing import Optional
+import secrets
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+# Same scheme but does not auto-raise when the Authorization header is missing,
+# so endpoints can fall back to the shared public user for no-login access.
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
+# Shared account used for public (no-login) watchlists and portfolios.
+PUBLIC_USER_EMAIL = "public@nse.local"
 
 class UserRegister(BaseModel):
     email: EmailStr
@@ -42,6 +49,30 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     if user is None:
         raise credentials_exception
     return user
+
+def get_or_create_public_user(db: Session) -> UserResponse:
+    """Return the shared public account, creating it on first use."""
+    repo = UserRepository(db)
+    user = repo.get_by_email(PUBLIC_USER_EMAIL)
+    if user is None:
+        user = repo.create(PUBLIC_USER_EMAIL, secrets.token_urlsafe(24))
+    return user
+
+def get_optional_user(
+    token: Optional[str] = Depends(oauth2_scheme_optional),
+    db: Session = Depends(get_db),
+) -> UserResponse:
+    """
+    Use the authenticated user when a valid token is supplied; otherwise fall
+    back to the shared public account so watchlists/portfolios work without login.
+    """
+    if token:
+        user_id = decode_access_token(token)
+        if user_id is not None:
+            user = UserRepository(db).get_by_id(int(user_id))
+            if user is not None:
+                return user
+    return get_or_create_public_user(db)
 
 @router.post("/signup", response_model=UserResponse)
 def signup(user_in: UserRegister, db: Session = Depends(get_db)):

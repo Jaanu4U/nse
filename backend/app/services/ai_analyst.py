@@ -1,4 +1,5 @@
 import logging
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from app.repositories.stock_repo import StockRepository
 from app.repositories.price_repo import PriceRepository

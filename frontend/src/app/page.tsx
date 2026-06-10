@@ -3,10 +3,9 @@
 import React, { useEffect, useState } from 'react';
 import { useStockStore, API_BASE, Stock } from '../store/useStockStore';
 import StockChart from '../components/StockChart';
-import AuthPanel from '../components/AuthPanel';
 import { 
-  TrendingUp, TrendingDown, Search, Shield, RefreshCw, BarChart2, 
-  Layers, Plus, Trash2, Filter, AlertTriangle, Cpu, Globe, Activity 
+  TrendingUp, TrendingDown, Search, Shield, RefreshCw, 
+  Filter, AlertTriangle, Cpu, Globe, Activity, Award, Zap, Rocket, ClipboardCheck 
 } from 'lucide-react';
 
 // Custom lightweight Markdown renderer to support AI Analyst tab cleanly without dependencies
@@ -58,9 +57,6 @@ export default function Home() {
     selectedSymbol, setSelectedSymbol,
     activeTab, setActiveTab,
     stocks, fetchStocks,
-    watchlists, fetchWatchlists, selectedWatchlistId, createWatchlist, addToWatchlist, removeFromWatchlist,
-    portfolios, fetchPortfolios, selectedPortfolioId, createPortfolio, addTransaction, portfolioDetail, fetchPortfolioDetail,
-    token,
     fiiDiiData, insiderTrades, optionsChain,
     fetchFiiDiiData, fetchInsiderTrades, fetchOptionsChain
   } = useStockStore();
@@ -86,6 +82,11 @@ export default function Home() {
   const [newsData, setNewsData] = useState<any[]>([]);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
   const [loadingAi, setLoadingAi] = useState(false);
+  const [analyticsData, setAnalyticsData] = useState<any>(null);
+  const [backtestData, setBacktestData] = useState<any>(null);
+  const [extraIndicators, setExtraIndicators] = useState<any>(null);
+  const [fundamentals, setFundamentals] = useState<any>(null);
+  const [correlation, setCorrelation] = useState<any>(null);
 
   // Screener states
   const [peFilter, setPeFilter] = useState<number>(50);
@@ -95,35 +96,68 @@ export default function Home() {
   const [screenerResults, setScreenerResults] = useState<any[]>([]);
   const [screenerLoading, setScreenerLoading] = useState(false);
 
-  // Portfolio Transaction Form states
-  const [txSymbol, setTxSymbol] = useState(selectedSymbol);
-  const [txType, setTxType] = useState('BUY');
-  const [txQty, setTxQty] = useState(10);
-  const [txPrice, setTxPrice] = useState(1500);
-  const [txCharges, setTxCharges] = useState(20);
-  const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
+  // Top high-probability picks states
+  const [topPicks, setTopPicks] = useState<any[]>([]);
+  const [topPicksLoading, setTopPicksLoading] = useState(false);
 
-  // Watchlist Creator states
-  const [wlNameInput, setWlNameInput] = useState('');
-  const [portNameInput, setPortNameInput] = useState('');
+  // Daily picks scorecard / archive states
+  const [picksReport, setPicksReport] = useState<any>(null);
+  const [picksReportLoading, setPicksReportLoading] = useState(false);
+  const [picksDates, setPicksDates] = useState<string[]>([]);
+  const [selectedPickDate, setSelectedPickDate] = useState<string>('');
+
+  // Breakout-ready scanner states
+  const [breakoutReady, setBreakoutReady] = useState<any[]>([]);
+  const [breakoutLoading, setBreakoutLoading] = useState(false);
+  const [stockBreakouts, setStockBreakouts] = useState<any>(null);
+  const [catalog, setCatalog] = useState<any[]>([]);
+  const [showCatalog, setShowCatalog] = useState(false);
+  const [breakoutFilter, setBreakoutFilter] = useState<string>('all');
+
+  // Market pulse (breadth + sector rotation)
+  const [marketBreadth, setMarketBreadth] = useState<any>(null);
+  const [sectorPerf, setSectorPerf] = useState<any>(null);
+
+  // Background job progress (daily sync / full regeneration)
+  const [jobStatus, setJobStatus] = useState<any>(null);
+  const [showJobDone, setShowJobDone] = useState(false);
 
   // Fetch stocks list on mount
   useEffect(() => {
     fetchStocks();
   }, [fetchStocks]);
 
-  // Sync auth data when token changes
+  // Poll background job status so the UI can show a live progress bar
   useEffect(() => {
-    if (token) {
-      fetchWatchlists();
-      fetchPortfolios();
-    }
-  }, [token, fetchWatchlists, fetchPortfolios]);
+    let lastStatus = '';
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/metrics/job-status`);
+        if (!r.ok) return;
+        const d = await r.json();
+        setJobStatus(d);
+        // When a running job transitions to completed, show a "done" banner briefly.
+        if (lastStatus === 'running' && d.status === 'completed') {
+          setShowJobDone(true);
+          setTimeout(() => setShowJobDone(false), 8000);
+        }
+        lastStatus = d.status;
+      } catch { /* ignore */ }
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Fetch market pulse on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/market/breadth`).then(r => r.ok ? r.json() : null).then(d => d && setMarketBreadth(d)).catch(() => {});
+    fetch(`${API_BASE}/market/sectors`).then(r => r.ok ? r.json() : null).then(d => d && setSectorPerf(d)).catch(() => {});
+  }, []);
 
   // Fetch data for selected Stock symbol
   const loadStockData = async (symbol: string) => {
     setLoadingAnalysis(true);
-    setTxSymbol(symbol);
     try {
       // 1. Fetch main tech analysis (S&R, Breakout, Patterns, Preds)
       const res = await fetch(`${API_BASE}/stocks/${symbol}/analysis`);
@@ -145,6 +179,44 @@ export default function Home() {
         const news = await newsRes.json();
         setNewsData(news);
       }
+
+      // 3b. Fetch quant analytics (risk metrics, trend, trade levels) + backtest
+      setAnalyticsData(null);
+      setBacktestData(null);
+      fetch(`${API_BASE}/stocks/${symbol}/analytics`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setAnalyticsData(d))
+        .catch(() => {});
+      fetch(`${API_BASE}/stocks/${symbol}/backtest`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setBacktestData(d))
+        .catch(() => {});
+
+      // 3c. Fetch detected breakout patterns
+      setStockBreakouts(null);
+      fetch(`${API_BASE}/stocks/${symbol}/breakouts`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setStockBreakouts(d))
+        .catch(() => {});
+
+      // 3d. Fetch extra technical indicators (SAR, Donchian, Keltner, CMF, etc.)
+      setExtraIndicators(null);
+      fetch(`${API_BASE}/stocks/${symbol}/extra-indicators`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setExtraIndicators(d))
+        .catch(() => {});
+
+      // 3e. Fetch real fundamentals + DCF and return correlations
+      setFundamentals(null);
+      setCorrelation(null);
+      fetch(`${API_BASE}/stocks/${symbol}/fundamentals`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setFundamentals(d))
+        .catch(() => {});
+      fetch(`${API_BASE}/stocks/${symbol}/correlation`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setCorrelation(d))
+        .catch(() => {});
 
       // 4. Fetch Advanced modules from store
       await fetchInsiderTrades(symbol);
@@ -211,6 +283,80 @@ export default function Home() {
     handleRunScreener();
   }, []);
 
+  // Fetch top high-probability picks
+  const fetchTopPicks = async () => {
+    setTopPicksLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/screener/top-picks?limit=25`);
+      if (res.ok) {
+        const data = await res.json();
+        setTopPicks(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setTopPicksLoading(false);
+    }
+  };
+
+  // Load top picks on mount
+  useEffect(() => {
+    fetchTopPicks();
+  }, []);
+
+  // Fetch the daily picks scorecard/report (live OHLC + win-loss summary)
+  const fetchPicksReport = async (date?: string, refresh: boolean = false) => {
+    setPicksReportLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (date) params.set('date', date);
+      if (refresh) params.set('refresh', 'true');
+      const res = await fetch(`${API_BASE}/screener/picks/report?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setPicksReport(data);
+        if (data?.pick_date) setSelectedPickDate(data.pick_date);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setPicksReportLoading(false);
+    }
+  };
+
+  // Load archived pick dates + most-recent report on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/screener/picks/dates`)
+      .then(r => r.ok ? r.json() : [])
+      .then((d: string[]) => {
+        setPicksDates(d || []);
+        // Default to the most recent archived day ("yesterday's report")
+        fetchPicksReport(d && d.length ? d[0] : undefined, false);
+      })
+      .catch(() => {});
+  }, []);
+
+  const fetchBreakoutReady = async () => {
+    setBreakoutLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/screener/breakout-ready?limit=25&min_readiness=55`);
+      if (res.ok) setBreakoutReady(await res.json());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBreakoutLoading(false);
+    }
+  };
+
+  // Load breakout scanner + catalog on mount
+  useEffect(() => {
+    fetchBreakoutReady();
+    fetch(`${API_BASE}/screener/breakout-catalog`)
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setCatalog(d))
+      .catch(() => {});
+  }, []);
+
   // Filter stocks for autocomplete
   const filteredStocks = searchQuery 
     ? stocks.filter(s => 
@@ -219,8 +365,19 @@ export default function Home() {
       ).slice(0, 8)
     : [];
 
-  // Active Watchlist
-  const activeWatchlist = watchlists.find(w => w.id === selectedWatchlistId);
+  // Format a job timestamp (UTC ISO from backend) into local IST date & time.
+  const formatJobTime = (iso: string) => {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString('en-IN', {
+        day: '2-digit', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+        timeZone: 'Asia/Kolkata',
+      }) + ' IST';
+    } catch {
+      return iso;
+    }
+  };
 
   return (
     <main className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-black text-slate-100 p-6 flex flex-col gap-6">
@@ -292,219 +449,51 @@ export default function Home() {
         )}
       </header>
 
-      {/* DASHBOARD CONTENT GRID */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-        
-        {/* LEFT PANEL: AUTH, WATCHLIST, PORTFOLIO */}
-        <div className="xl:col-span-1 flex flex-col gap-6">
-          <AuthPanel />
-
-          {/* WATCHLIST SECTION */}
-          {token && (
-            <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                <div className="flex items-center gap-2">
-                  <Layers className="text-emerald-400 w-4 h-4" />
-                  <h2 className="text-sm font-bold">Watchlists</h2>
-                </div>
-                
-                {/* Watchlist Select dropdown */}
-                <select
-                  value={selectedWatchlistId || ""}
-                  onChange={(e) => useStockStore.setState({ selectedWatchlistId: Number(e.target.value) })}
-                  className="bg-slate-950 border border-slate-800 text-slate-300 text-2xs p-1 rounded focus:outline-none"
-                >
-                  {watchlists.map(w => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Create new Watchlist */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="New watchlist name..."
-                  value={wlNameInput}
-                  onChange={(e) => setWlNameInput(e.target.value)}
-                  className="flex-1 bg-slate-950/60 border border-slate-800 rounded-lg text-2xs px-2 py-1 text-slate-200 focus:outline-none"
-                />
-                <button
-                  onClick={() => {
-                    if (wlNameInput.trim()) {
-                      createWatchlist(wlNameInput.trim());
-                      setWlNameInput('');
-                    }
-                  }}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 p-1.5 rounded-lg transition-all"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Active Watchlist item list */}
-              {activeWatchlist ? (
-                <div className="flex flex-col gap-2 max-h-40 overflow-y-auto">
-                  {/* Dynamic add active symbol */}
-                  <div className="flex items-center justify-between bg-slate-950/30 p-2 rounded-xl border border-slate-800/50">
-                    <span className="text-2xs text-slate-400">Add current: <strong className="text-slate-200">{selectedSymbol}</strong></span>
-                    <button
-                      onClick={() => addToWatchlist(activeWatchlist.id, selectedSymbol)}
-                      className="text-emerald-400 hover:text-emerald-300 text-2xs font-semibold px-2 py-0.5 border border-emerald-500/20 rounded-md"
-                    >
-                      Add
-                    </button>
-                  </div>
-                  
-                  {/* Display watchlist items */}
-                  {/* In real database, watchlist items can be fetched. We'll simulate matching symbol items */}
-                  {activeWatchlist.stocks && activeWatchlist.stocks.map((s: any) => (
-                    <div key={s.id} className="flex items-center justify-between py-1 border-b border-slate-800/40 text-xs">
-                      <button
-                        onClick={() => setSelectedSymbol(s.symbol)}
-                        className="font-bold text-slate-300 hover:text-emerald-400 text-left transition-all"
-                      >
-                        {s.symbol}
-                      </button>
-                      <button
-                        onClick={() => removeFromWatchlist(activeWatchlist.id, s.symbol)}
-                        className="text-slate-500 hover:text-red-400 transition-all"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-2xs text-slate-500 text-center">No watchlists found.</p>
-              )}
-            </div>
+      {/* BACKGROUND JOB PROGRESS BANNER */}
+      {((jobStatus && jobStatus.status === 'running') || showJobDone) && (
+        <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl border backdrop-blur-lg shadow-lg ${jobStatus?.status === 'running' ? 'bg-sky-950/30 border-sky-800/50' : 'bg-emerald-950/30 border-emerald-700/50'}`}>
+          {jobStatus?.status === 'running' ? (
+            <RefreshCw className="w-4 h-4 text-sky-400 animate-spin flex-shrink-0" />
+          ) : (
+            <Award className="w-4 h-4 text-emerald-400 flex-shrink-0" />
           )}
-
-          {/* PORTFOLIO SECTION */}
-          {token && (
-            <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                <div className="flex items-center gap-2">
-                  <BarChart2 className="text-emerald-400 w-4 h-4" />
-                  <h2 className="text-sm font-bold">Portfolios</h2>
-                </div>
-                
-                <select
-                  value={selectedPortfolioId || ""}
-                  onChange={(e) => {
-                    const id = Number(e.target.value);
-                    useStockStore.setState({ selectedPortfolioId: id });
-                    fetchPortfolioDetail(id);
-                  }}
-                  className="bg-slate-950 border border-slate-800 text-slate-300 text-2xs p-1 rounded focus:outline-none"
-                >
-                  {portfolios.map(p => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Create Portfolio */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="New portfolio name..."
-                  value={portNameInput}
-                  onChange={(e) => setPortNameInput(e.target.value)}
-                  className="flex-1 bg-slate-950/60 border border-slate-800 rounded-lg text-2xs px-2 py-1 text-slate-200 focus:outline-none"
-                />
-                <button
-                  onClick={() => {
-                    if (portNameInput.trim()) {
-                      createPortfolio(portNameInput.trim());
-                      setPortNameInput('');
-                    }
-                  }}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 p-1.5 rounded-lg transition-all"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Summary Dashboard */}
-              {portfolioDetail?.summary && (
-                <div className="grid grid-cols-2 gap-2 bg-slate-950/40 border border-slate-800/50 rounded-xl p-2.5">
-                  <div className="flex flex-col">
-                    <span className="text-3xs text-slate-500 uppercase font-semibold">Invested</span>
-                    <span className="text-xs font-bold text-slate-200">₹{portfolioDetail.summary.total_invested}</span>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="text-3xs text-slate-500 uppercase font-semibold">Value</span>
-                    <span className="text-xs font-bold text-slate-200">₹{portfolioDetail.summary.total_current_value}</span>
-                  </div>
-                  <div className="flex flex-col col-span-2 border-t border-slate-800/50 pt-1 mt-1">
-                    <span className="text-3xs text-slate-500 uppercase font-semibold">Unrealized P&L</span>
-                    <span className={`text-xs font-bold flex items-center gap-1 ${portfolioDetail.summary.total_unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {portfolioDetail.summary.total_unrealized_pnl >= 0 ? '+' : ''}
-                      ₹{portfolioDetail.summary.total_unrealized_pnl} ({portfolioDetail.summary.total_unrealized_pnl_pct}%)
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Add transaction form */}
-              {selectedPortfolioId && (
-                <form 
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    addTransaction(selectedPortfolioId, txSymbol, txType, txQty, txPrice, txDate, txCharges);
-                  }}
-                  className="space-y-2.5 border-t border-slate-800 pt-3"
-                >
-                  <span className="block text-2xs font-bold text-slate-350">Add Trade (Record Ledger)</span>
-                  
-                  <div className="grid grid-cols-2 gap-2">
-                    <input
-                      type="text"
-                      placeholder="Symbol"
-                      value={txSymbol}
-                      onChange={(e) => setTxSymbol(e.target.value.toUpperCase())}
-                      className="bg-slate-950/60 border border-slate-800 rounded-lg text-2xs px-2 py-1 text-slate-200 focus:outline-none"
-                    />
-                    <select
-                      value={txType}
-                      onChange={(e) => setTxType(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 text-slate-300 text-2xs p-1 rounded focus:outline-none"
-                    >
-                      <option value="BUY">BUY</option>
-                      <option value="SELL">SELL</option>
-                    </select>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <input
-                      type="number"
-                      placeholder="Qty"
-                      value={txQty}
-                      onChange={(e) => setTxQty(Number(e.target.value))}
-                      className="bg-slate-950/60 border border-slate-800 rounded-lg text-2xs px-2 py-1 text-slate-200 focus:outline-none"
-                    />
-                    <input
-                      type="number"
-                      placeholder="Price"
-                      value={txPrice}
-                      onChange={(e) => setTxPrice(Number(e.target.value))}
-                      className="bg-slate-950/60 border border-slate-800 rounded-lg text-2xs px-2 py-1 text-slate-200 focus:outline-none"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full py-1 bg-emerald-600 hover:bg-emerald-500 text-slate-950 text-2xs font-bold rounded-lg transition-all shadow-md"
-                  >
-                    Add Trade
-                  </button>
-                </form>
-              )}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-3 mb-1">
+              <span className={`text-2xs font-bold ${jobStatus?.status === 'running' ? 'text-sky-300' : 'text-emerald-300'}`}>
+                {jobStatus?.status === 'running'
+                  ? `Background update running — ${jobStatus?.message || 'processing…'}`
+                  : (jobStatus?.message || 'Background update complete')}
+              </span>
+              <span className="text-2xs text-slate-400 flex-shrink-0">
+                {jobStatus?.status === 'running'
+                  ? `${jobStatus?.current ?? 0}${jobStatus?.total ? ` / ${jobStatus.total}` : ''}${jobStatus?.percent != null ? ` · ${jobStatus.percent}%` : ''}`
+                  : '100%'}
+              </span>
             </div>
+            <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${jobStatus?.status === 'running' ? 'bg-sky-500' : 'bg-emerald-500'}`}
+                style={{ width: `${jobStatus?.status === 'running' ? (jobStatus?.percent ?? 5) : 100}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LAST UPDATE TIMESTAMP (shown when idle / no active job) */}
+      {jobStatus && jobStatus.status !== 'running' && !showJobDone && jobStatus.completed_at && (
+        <div className="flex items-center gap-2 px-4 py-2 -mt-2 text-2xs text-slate-400">
+          <Activity className={`w-3 h-3 flex-shrink-0 ${jobStatus.status === 'failed' ? 'text-red-400' : 'text-emerald-400'}`} />
+          {jobStatus.status === 'failed' ? (
+            <span className="text-red-300">Last background update <span className="font-bold">failed</span> — {formatJobTime(jobStatus.completed_at)}</span>
+          ) : (
+            <span>Last data update completed: <span className="font-bold text-slate-200">{formatJobTime(jobStatus.completed_at)}</span></span>
           )}
         </div>
+      )}
+
+      {/* DASHBOARD CONTENT GRID */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
 
         {/* CENTER PANEL: CHART & DETAILED ANALYTICS */}
         <div className="xl:col-span-2 flex flex-col gap-6">
@@ -763,6 +752,339 @@ export default function Home() {
                           </div>
                         )}
 
+                        {/* Quant Analytics: Trade Levels + Risk Metrics + Backtest */}
+                        {analyticsData && (
+                          <div className="space-y-3">
+                            {/* Trade Plan */}
+                            {analyticsData.trade_levels && analyticsData.trade_levels.stop_loss && (
+                              <div className="space-y-2">
+                                <span className="text-2xs font-bold text-amber-300">ATR Trade Plan</span>
+                                <div className="grid grid-cols-3 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-center">
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Entry</p>
+                                    <p className="text-xs font-bold text-slate-100">₹{analyticsData.trade_levels.entry}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Stop-Loss</p>
+                                    <p className="text-xs font-bold text-red-400">₹{analyticsData.trade_levels.stop_loss}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Target</p>
+                                    <p className="text-xs font-bold text-emerald-400">₹{analyticsData.trade_levels.target}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Risk:Reward</p>
+                                    <p className="text-xs font-bold text-amber-300">1:{analyticsData.trade_levels.risk_reward}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">ATR (14)</p>
+                                    <p className="text-xs font-bold text-slate-300">{analyticsData.trade_levels.atr}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Pivot</p>
+                                    <p className="text-xs font-bold text-slate-300">₹{analyticsData.trade_levels.pivot}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Risk / Trend Metrics */}
+                            {analyticsData.risk_metrics && analyticsData.risk_metrics.sharpe !== undefined && (
+                              <div className="space-y-2">
+                                <span className="text-2xs font-bold text-sky-300">Risk-Adjusted Metrics (2Y)
+                                  {analyticsData.trend?.regime && (
+                                    <span className="ml-2 text-3xs px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">{analyticsData.trend.regime.replace('_', ' ')}</span>
+                                  )}
+                                </span>
+                                <div className="grid grid-cols-4 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-center">
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Sharpe</p>
+                                    <p className={`text-xs font-bold ${analyticsData.risk_metrics.sharpe >= 1 ? 'text-emerald-400' : analyticsData.risk_metrics.sharpe >= 0 ? 'text-slate-200' : 'text-red-400'}`}>{analyticsData.risk_metrics.sharpe}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Sortino</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.risk_metrics.sortino}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">CAGR</p>
+                                    <p className={`text-xs font-bold ${analyticsData.risk_metrics.cagr >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{analyticsData.risk_metrics.cagr}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Volatility</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.risk_metrics.volatility}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Max DD</p>
+                                    <p className="text-xs font-bold text-red-400">{analyticsData.risk_metrics.max_drawdown}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Calmar</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.risk_metrics.calmar}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Trend %/yr</p>
+                                    <p className={`text-xs font-bold ${(analyticsData.trend?.trend_slope_annual ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{analyticsData.trend?.trend_slope_annual ?? '-'}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Ulcer</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.risk_metrics.ulcer_index}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Advanced Risk: VaR / beta / alpha / range vols */}
+                            {analyticsData.advanced_risk && analyticsData.advanced_risk.var_95_hist !== undefined && (
+                              <div className="space-y-2">
+                                <span className="text-2xs font-bold text-rose-300">Tail Risk &amp; Benchmark Metrics (2Y)</span>
+                                <div className="grid grid-cols-4 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-center">
+                                  <div>
+                                    <p className="text-3xs text-slate-500">VaR 95%</p>
+                                    <p className="text-xs font-bold text-red-400">{analyticsData.advanced_risk.var_95_hist}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">VaR 99%</p>
+                                    <p className="text-xs font-bold text-red-400">{analyticsData.advanced_risk.var_99_hist}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">CVaR 95%</p>
+                                    <p className="text-xs font-bold text-red-400">{analyticsData.advanced_risk.cvar_95}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Beta</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.beta ?? '-'}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Alpha %/yr</p>
+                                    <p className={`text-xs font-bold ${(analyticsData.advanced_risk.alpha ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{analyticsData.advanced_risk.alpha ?? '-'}{analyticsData.advanced_risk.alpha != null ? '%' : ''}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Treynor</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.treynor ?? '-'}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Info Ratio</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.information_ratio ?? '-'}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Omega</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.omega}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Skew</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.skew}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Kurtosis</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.kurtosis}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Tail Ratio</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.tail_ratio}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Gain/Pain</p>
+                                    <p className={`text-xs font-bold ${(analyticsData.advanced_risk.gain_to_pain ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{analyticsData.advanced_risk.gain_to_pain}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Vol Parkinson</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.vol_parkinson}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Vol G-Klass</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.vol_garman_klass}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Vol Yang-Zhang</p>
+                                    <p className="text-xs font-bold text-slate-200">{analyticsData.advanced_risk.vol_yang_zhang ?? '-'}{analyticsData.advanced_risk.vol_yang_zhang != null ? '%' : ''}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Backtest */}
+                            {backtestData && !backtestData.error && (
+                              <div className="space-y-2">
+                                <span className="text-2xs font-bold text-violet-300">Model Backtest (+1% signal)</span>
+                                <div className="grid grid-cols-3 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-center">
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Hit Rate</p>
+                                    <p className="text-xs font-bold text-emerald-400">{backtestData.signal_hit_rate}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Edge vs Base</p>
+                                    <p className={`text-xs font-bold ${backtestData.edge_vs_base >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{backtestData.edge_vs_base > 0 ? '+' : ''}{backtestData.edge_vs_base}%</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-3xs text-slate-500">Accuracy</p>
+                                    <p className="text-xs font-bold text-slate-200">{backtestData.directional_accuracy}%</p>
+                                  </div>
+                                </div>
+                                <p className="text-3xs text-slate-500 italic text-center">{backtestData.signals_fired} signals over {backtestData.samples_evaluated} sessions · base rate {backtestData.base_rate}%</p>
+                              </div>
+                            )}
+
+                            {/* Detected Breakout Patterns */}
+                            {stockBreakouts && (
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-2xs font-bold text-fuchsia-300 flex items-center gap-1">
+                                    <Rocket className="w-3 h-3" /> Breakout Patterns
+                                  </span>
+                                  {stockBreakouts.readiness != null && (
+                                    <span className={`text-2xs font-bold ${stockBreakouts.readiness >= 70 ? 'text-fuchsia-300' : stockBreakouts.readiness >= 50 ? 'text-amber-300' : 'text-slate-400'}`}>
+                                      Readiness {stockBreakouts.readiness}/100
+                                    </span>
+                                  )}
+                                </div>
+                                {stockBreakouts.nearest_breakout != null && (
+                                  <div className="grid grid-cols-2 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-center">
+                                    <div>
+                                      <p className="text-3xs text-slate-500">Nearest Breakout</p>
+                                      <p className="text-xs font-bold text-slate-200">₹{stockBreakouts.nearest_breakout?.toFixed(1)}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-3xs text-slate-500">Distance</p>
+                                      <p className="text-xs font-bold text-fuchsia-300">{stockBreakouts.pct_to_breakout > 0 ? '+' : ''}{stockBreakouts.pct_to_breakout}%</p>
+                                    </div>
+                                  </div>
+                                )}
+                                {stockBreakouts.patterns && stockBreakouts.patterns.length > 0 ? (
+                                  <div className="space-y-1.5">
+                                    {stockBreakouts.patterns.map((p: any, i: number) => (
+                                      <div key={i} className="bg-slate-950/30 border border-slate-800/50 rounded-2xl p-2.5 text-3xs">
+                                        <div className="flex items-center gap-1.5 mb-1">
+                                          <span className={`px-1 py-0.5 rounded font-bold ${p.signal === 'BULLISH' ? 'bg-emerald-900/50 text-emerald-300' : p.signal === 'BEARISH' ? 'bg-red-900/50 text-red-300' : 'bg-slate-800 text-slate-300'}`}>{p.signal}</span>
+                                          <span className="font-bold text-slate-200">{p.label}</span>
+                                          <span className={`ml-auto px-1 py-0.5 rounded font-bold ${p.status === 'BREAKOUT' ? 'bg-fuchsia-900/50 text-fuchsia-300' : p.status === 'READY' ? 'bg-emerald-900/40 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>{p.status}</span>
+                                        </div>
+                                        <div className="flex items-center gap-3 text-slate-400 mb-1">
+                                          <span>Conf <span className="font-bold text-slate-200">{p.confidence}%</span></span>
+                                          {p.breakout_level != null && <span>B/O <span className="font-bold text-slate-200">₹{p.breakout_level?.toFixed(1)}</span></span>}
+                                          {p.stop != null && <span>Stop <span className="font-bold text-red-300">₹{p.stop?.toFixed(1)}</span></span>}
+                                        </div>
+                                        {p.advantage && <p className="text-emerald-400/80"><span className="text-slate-500">+ </span>{p.advantage}</p>}
+                                        {p.disadvantage && <p className="text-red-400/70"><span className="text-slate-500">− </span>{p.disadvantage}</p>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="text-3xs text-slate-500 italic text-center">No active breakout patterns detected.</p>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Extra Technical Indicators */}
+                            {extraIndicators?.indicators && (() => {
+                              const ix = extraIndicators.indicators;
+                              const tag = (v: string) => {
+                                const bull = ['BULLISH', 'ACCUMULATION', 'UP', 'LONG', 'UPTREND', 'GREEN'].includes(v);
+                                const bear = ['BEARISH', 'DISTRIBUTION', 'DOWN', 'SHORT', 'DOWNTREND', 'RED'].includes(v);
+                                return <span className={`px-1 py-0.5 rounded font-bold ${bull ? 'bg-emerald-900/50 text-emerald-300' : bear ? 'bg-red-900/50 text-red-300' : 'bg-slate-800 text-slate-300'}`}>{v}</span>;
+                              };
+                              return (
+                                <div className="space-y-2">
+                                  <span className="text-2xs font-bold text-cyan-300">Extra Indicators</span>
+                                  <div className="grid grid-cols-2 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-3xs">
+                                    <div className="flex justify-between"><span className="text-slate-500">Parabolic SAR</span><span>₹{ix.parabolic_sar.value} {tag(ix.parabolic_sar.trend)}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">CMF (20)</span><span>{ix.cmf.value} {tag(ix.cmf.signal)}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Aroon Osc</span><span className={`font-bold ${ix.aroon.oscillator >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{ix.aroon.oscillator}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Vortex</span><span>{ix.vortex.vi_plus}/{ix.vortex.vi_minus} {tag(ix.vortex.signal)}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">TRIX (15)</span><span>{ix.trix.value} {tag(ix.trix.signal)}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">TTM Squeeze</span><span className={ix.ttm_squeeze.squeeze_on ? 'text-amber-300 font-bold' : 'text-slate-400'}>{ix.ttm_squeeze.squeeze_on ? 'ON' : 'OFF'} {tag(ix.ttm_squeeze.momentum_dir)}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Donchian (20)</span><span className="text-slate-300">₹{ix.donchian.lower}–{ix.donchian.upper}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Keltner (20)</span><span className="text-slate-300">₹{ix.keltner.lower}–{ix.keltner.upper}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Heikin-Ashi</span><span>{tag(ix.heikin_ashi.color)} ×{ix.heikin_ashi.streak}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Chandelier</span><span>₹{ix.chandelier_exit.long_stop} {tag(ix.chandelier_exit.bias)}</span></div>
+                                  </div>
+                                  {ix.fibonacci?.levels && Object.keys(ix.fibonacci.levels).length > 0 && (
+                                    <div className="bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-3xs">
+                                      <div className="flex items-center justify-between mb-1.5">
+                                        <span className="text-slate-400 font-bold">Fibonacci Retracement</span>
+                                        <span className="text-slate-500">{ix.fibonacci.direction} · ₹{ix.fibonacci.swing_low}–{ix.fibonacci.swing_high}</span>
+                                      </div>
+                                      <div className="grid grid-cols-5 gap-1 text-center">
+                                        {Object.entries(ix.fibonacci.levels).map(([k, v]: any) => (
+                                          <div key={k}>
+                                            <p className="text-slate-500">{k}</p>
+                                            <p className="font-bold text-slate-200">₹{v}</p>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+
+                            {/* Fundamentals & Valuation */}
+                            {fundamentals?.available && (() => {
+                              const f = fundamentals;
+                              const inr = (v: number) => {
+                                if (v == null) return '—';
+                                const a = Math.abs(v);
+                                if (a >= 1e12) return `₹${(v / 1e12).toFixed(2)}T`;
+                                if (a >= 1e9) return `₹${(v / 1e9).toFixed(2)}B`;
+                                if (a >= 1e7) return `₹${(v / 1e7).toFixed(2)}Cr`;
+                                return `₹${v.toFixed(0)}`;
+                              };
+                              const fx = (v: any, s = '') => (v == null ? '—' : `${v}${s}`);
+                              const dcf = f.dcf;
+                              return (
+                                <div className="space-y-2">
+                                  <span className="text-2xs font-bold text-amber-300">Fundamentals & Valuation</span>
+                                  <div className="grid grid-cols-3 gap-2 bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-3xs">
+                                    <div className="flex flex-col"><span className="text-slate-500">P/E</span><span className="font-bold text-slate-200">{fx(f.pe)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">P/B</span><span className="font-bold text-slate-200">{fx(f.pb)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">EPS</span><span className="font-bold text-slate-200">{fx(f.eps)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">ROE</span><span className="font-bold text-emerald-300">{fx(f.roe, '%')}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">ROCE</span><span className="font-bold text-emerald-300">{fx(f.roce, '%')}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">D/E</span><span className="font-bold text-slate-200">{fx(f.debt_to_equity)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">Revenue</span><span className="font-bold text-slate-200">{inr(f.revenue)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">Net Income</span><span className="font-bold text-slate-200">{inr(f.net_income)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">Free Cash Flow</span><span className="font-bold text-slate-200">{inr(f.free_cash_flow)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">Mkt Cap</span><span className="font-bold text-slate-200">{inr(f.market_cap)}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">Rev Growth</span><span className={`font-bold ${(f.revenue_growth ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{fx(f.revenue_growth, '%')}</span></div>
+                                    <div className="flex flex-col"><span className="text-slate-500">Div Yield</span><span className="font-bold text-slate-200">{fx(f.dividend_yield, '%')}</span></div>
+                                  </div>
+                                  {dcf && (
+                                    <div className="bg-slate-950/30 border border-amber-800/30 p-3 rounded-2xl text-3xs">
+                                      <div className="flex items-center justify-between mb-1.5">
+                                        <span className="text-amber-300 font-bold">DCF Intrinsic Value</span>
+                                        <span className={`px-1.5 py-0.5 rounded font-bold ${dcf.verdict === 'UNDERVALUED' ? 'bg-emerald-900/50 text-emerald-300' : dcf.verdict === 'OVERVALUED' ? 'bg-red-900/50 text-red-300' : 'bg-slate-800 text-slate-300'}`}>{dcf.verdict.replace('_', ' ')}</span>
+                                      </div>
+                                      <div className="grid grid-cols-3 gap-2 text-center">
+                                        <div><p className="text-slate-500">Fair Value</p><p className="font-bold text-amber-200">₹{dcf.intrinsic_value}</p></div>
+                                        <div><p className="text-slate-500">Price</p><p className="font-bold text-slate-200">₹{dcf.current_price}</p></div>
+                                        <div><p className="text-slate-500">Upside</p><p className={`font-bold ${dcf.upside_pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{dcf.upside_pct > 0 ? '+' : ''}{dcf.upside_pct}%</p></div>
+                                      </div>
+                                      <p className="text-3xs text-slate-600 mt-1.5 text-center">FCF growth {dcf.growth_assumed}% · discount {dcf.discount_rate}%</p>
+                                    </div>
+                                  )}
+                                  {correlation?.correlations?.length > 0 && (
+                                    <div className="bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl text-3xs">
+                                      <span className="text-slate-400 font-bold">Return Correlation (90d)</span>
+                                      <div className="mt-1.5 space-y-1">
+                                        {correlation.correlations.slice(0, 6).map((c: any) => (
+                                          <div key={c.symbol} className="flex items-center justify-between">
+                                            <span className="text-slate-400 truncate max-w-[60%]">{c.symbol}{c.type === 'benchmark' ? ' ★' : ''}</span>
+                                            <div className="flex items-center gap-2">
+                                              <div className="w-16 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                                                <div className={`h-full ${c.correlation >= 0 ? 'bg-emerald-500' : 'bg-red-500'}`} style={{ width: `${Math.abs(c.correlation) * 100}%` }} />
+                                              </div>
+                                              <span className={`font-bold w-9 text-right ${c.correlation >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{c.correlation}</span>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )}
+
                       </div>
                     )}
                   </div>
@@ -974,7 +1296,7 @@ export default function Home() {
                 {activeTab === 'options_chain' && (
                   <div className="space-y-4">
                     {optionsChain && (
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-slate-950/30 border border-slate-800/50 p-3.5 rounded-2xl">
+                      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 bg-slate-950/30 border border-slate-800/50 p-3.5 rounded-2xl">
                         <div className="flex flex-col">
                           <span className="text-3xs text-slate-400 uppercase font-semibold">Underlying Close</span>
                           <span className="text-sm font-bold text-slate-200">₹{optionsChain.underlying_price}</span>
@@ -995,8 +1317,50 @@ export default function Home() {
                             {(optionsChain.total_call_oi / 100000).toFixed(1)}L / {(optionsChain.total_put_oi / 100000).toFixed(1)}L
                           </span>
                         </div>
+                        {optionsChain.base_iv != null && (
+                          <div className="flex flex-col">
+                            <span className="text-3xs text-slate-400 uppercase font-semibold">Base IV (30D HV)</span>
+                            <span className="text-sm font-bold text-sky-300">{optionsChain.base_iv}%</span>
+                          </div>
+                        )}
+                        {optionsChain.days_to_expiry != null && (
+                          <div className="flex flex-col">
+                            <span className="text-3xs text-slate-400 uppercase font-semibold">Days to Expiry</span>
+                            <span className="text-sm font-bold text-slate-200">{optionsChain.days_to_expiry}d</span>
+                          </div>
+                        )}
                       </div>
                     )}
+
+                    {/* ATM Black-Scholes Greeks */}
+                    {optionsChain?.strikes && optionsChain.atm_strike != null && (() => {
+                      const atmRow = optionsChain.strikes.find((s: any) => s.strike === optionsChain.atm_strike) || optionsChain.strikes[Math.floor(optionsChain.strikes.length / 2)];
+                      if (!atmRow) return null;
+                      const G = ({ label, c, p, fmt }: any) => (
+                        <div className="flex flex-col items-center">
+                          <span className="text-3xs text-slate-500 uppercase">{label}</span>
+                          <span className="text-2xs font-bold text-emerald-400">{fmt(c)}</span>
+                          <span className="text-2xs font-bold text-red-400">{fmt(p)}</span>
+                        </div>
+                      );
+                      const n = (x: number) => (x >= 0 ? '+' : '') + x.toFixed(3);
+                      return (
+                        <div className="bg-slate-950/30 border border-slate-800/50 p-3 rounded-2xl space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-2xs font-bold text-sky-300">ATM Greeks @ ₹{optionsChain.atm_strike} (Black-Scholes)</span>
+                            <span className="text-3xs text-slate-500"><span className="text-emerald-400">●</span> Call <span className="text-red-400 ml-1">●</span> Put</span>
+                          </div>
+                          <div className="grid grid-cols-6 gap-2 text-center">
+                            <G label="Delta" c={atmRow.call.delta} p={atmRow.put.delta} fmt={n} />
+                            <G label="Gamma" c={atmRow.call.gamma} p={atmRow.put.gamma} fmt={(x: number) => x.toFixed(5)} />
+                            <G label="Theta/day" c={atmRow.call.theta} p={atmRow.put.theta} fmt={n} />
+                            <G label="Vega/1%" c={atmRow.call.vega} p={atmRow.put.vega} fmt={(x: number) => x.toFixed(3)} />
+                            <G label="Rho/1%" c={atmRow.call.rho} p={atmRow.put.rho} fmt={n} />
+                            <G label="IV" c={atmRow.call.iv} p={atmRow.put.iv} fmt={(x: number) => x.toFixed(1) + '%'} />
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     <div className="max-h-80 overflow-y-auto pr-1">
                       <table className="w-full text-center text-3xs border-collapse">
@@ -1149,6 +1513,354 @@ export default function Home() {
 
         {/* RIGHT PANEL: STOCK SCREENER */}
         <div className="xl:col-span-1">
+          {/* Market Pulse Panel */}
+          <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-3 mb-6">
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+              <Activity className="text-sky-400 w-4 h-4" />
+              <h2 className="text-sm font-bold">Market Pulse</h2>
+              {marketBreadth?.sentiment && (
+                <span className={`ml-auto px-2 py-0.5 rounded-lg text-2xs font-bold ${marketBreadth.sentiment === 'RISK_ON' ? 'bg-emerald-900/50 text-emerald-300' : marketBreadth.sentiment === 'RISK_OFF' ? 'bg-red-900/50 text-red-300' : 'bg-slate-800 text-slate-300'}`}>{marketBreadth.sentiment.replace('_', ' ')}</span>
+              )}
+            </div>
+            {marketBreadth ? (
+              <>
+                <div className="flex items-center gap-1 h-2 rounded-full overflow-hidden bg-slate-800">
+                  <div className="h-full bg-emerald-500" style={{ width: `${marketBreadth.pct_advancing}%` }} />
+                  <div className="h-full bg-red-500/80 flex-1" />
+                </div>
+                <div className="flex justify-between text-3xs">
+                  <span className="text-emerald-400 font-bold">▲ {marketBreadth.advances} adv</span>
+                  <span className="text-slate-500">A/D {marketBreadth.ad_ratio}</span>
+                  <span className="text-red-400 font-bold">{marketBreadth.declines} dec ▼</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-3xs">
+                  <div className="bg-slate-950/40 rounded-xl p-2"><span className="text-slate-500">% &gt; EMA50</span><p className="font-bold text-slate-200">{marketBreadth.pct_above_ema50}%</p></div>
+                  <div className="bg-slate-950/40 rounded-xl p-2"><span className="text-slate-500">% &gt; EMA200</span><p className="font-bold text-slate-200">{marketBreadth.pct_above_ema200}%</p></div>
+                  <div className="bg-slate-950/40 rounded-xl p-2"><span className="text-slate-500">Avg RSI</span><p className="font-bold text-slate-200">{marketBreadth.avg_rsi ?? '—'}</p></div>
+                  <div className="bg-slate-950/40 rounded-xl p-2"><span className="text-slate-500">52w Hi/Lo</span><p className="font-bold"><span className="text-emerald-300">{marketBreadth.new_highs_52w}</span><span className="text-slate-600"> / </span><span className="text-red-300">{marketBreadth.new_lows_52w}</span></p></div>
+                </div>
+              </>
+            ) : (
+              <p className="text-3xs text-slate-500 italic text-center py-2">Loading breadth…</p>
+            )}
+            {sectorPerf?.leaders?.length > 0 && (
+              <div className="border-t border-slate-800 pt-2">
+                <span className="text-2xs font-bold text-slate-300">Sector Rotation (20d)</span>
+                <div className="mt-1.5 space-y-1">
+                  {sectorPerf.leaders.slice(0, 3).map((s: any) => (
+                    <div key={s.industry} className="flex items-center justify-between text-3xs">
+                      <span className="text-slate-400 truncate max-w-[70%]">▲ {s.industry}</span>
+                      <span className="font-bold text-emerald-300">+{s.return_20d}%</span>
+                    </div>
+                  ))}
+                  {sectorPerf.laggards.slice(0, 3).map((s: any) => (
+                    <div key={s.industry} className="flex items-center justify-between text-3xs">
+                      <span className="text-slate-400 truncate max-w-[70%]">▼ {s.industry}</span>
+                      <span className={`font-bold ${s.return_20d >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{s.return_20d > 0 ? '+' : ''}{s.return_20d}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-4 mb-6">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-2">
+                <Award className="text-amber-400 w-4 h-4" />
+                <h2 className="text-sm font-bold">Top 25 High-Probability Picks</h2>
+              </div>
+              <button
+                onClick={fetchTopPicks}
+                disabled={topPicksLoading}
+                className="text-slate-400 hover:text-emerald-400 disabled:opacity-50 transition-all"
+                title="Refresh picks"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${topPicksLoading ? 'animate-spin text-emerald-500' : ''}`} />
+              </button>
+            </div>
+
+            <p className="text-3xs text-slate-500 -mt-1">
+              Ranked by composite ML next-day return probability (calibrated XGBoost).
+            </p>
+
+            <div className="flex flex-col gap-1.5 max-h-[28rem] overflow-y-auto pr-1">
+              {topPicksLoading ? (
+                <div className="py-8 flex items-center justify-center">
+                  <RefreshCw className="animate-spin text-emerald-500 w-5 h-5" />
+                </div>
+              ) : (
+                topPicks.map((pick) => (
+                  <button
+                    key={pick.symbol}
+                    onClick={() => setSelectedSymbol(pick.symbol)}
+                    className={`w-full text-left p-2 border rounded-xl text-xs flex items-center gap-2.5 transition-all ${
+                      pick.symbol === selectedSymbol
+                        ? 'bg-emerald-950/20 border-emerald-550/40'
+                        : 'bg-slate-950/30 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className={`flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-lg text-3xs font-bold ${
+                      pick.rank <= 3 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800/60 text-slate-400'
+                    }`}>
+                      {pick.rank}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <span className="font-bold block text-slate-200">{pick.symbol}</span>
+                      <span className="text-3xs text-slate-500 truncate block">{pick.company_name}</span>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <span className="font-bold text-slate-200 block">₹{pick.price.toFixed(1)}</span>
+                      <span className={`text-3xs font-semibold flex items-center gap-0.5 justify-end ${pick.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {pick.change_pct >= 0 ? <TrendingUp className="w-2.5 h-2.5" /> : <TrendingDown className="w-2.5 h-2.5" />}
+                        {pick.change_pct.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="flex-shrink-0 flex flex-col items-end gap-0.5 w-14">
+                      <span className="flex items-center gap-0.5 text-3xs font-bold text-emerald-300">
+                        <Zap className="w-2.5 h-2.5" />{pick.confidence}%
+                      </span>
+                      <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                        <div className="h-full bg-emerald-500" style={{ width: `${Math.min(pick.confidence, 100)}%` }} />
+                      </div>
+                    </div>
+                  </button>
+                ))
+              )}
+
+              {!topPicksLoading && topPicks.length === 0 && (
+                <p className="text-3xs text-slate-500 text-center py-4">No prediction data available yet.</p>
+              )}
+            </div>
+          </div>
+
+          {/* Daily Picks Scorecard / Archive Panel */}
+          <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-3 mb-6">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-2">
+                <ClipboardCheck className="text-sky-400 w-4 h-4" />
+                <h2 className="text-sm font-bold">Picks Scorecard</h2>
+              </div>
+              <div className="flex items-center gap-3">
+                {picksDates.length > 0 && (
+                  <select
+                    value={selectedPickDate}
+                    onChange={(e) => { setSelectedPickDate(e.target.value); fetchPicksReport(e.target.value, false); }}
+                    className="bg-slate-950/60 border border-slate-700 rounded-lg text-3xs text-slate-300 px-1.5 py-1 focus:outline-none focus:border-sky-500"
+                    title="Archived pick date"
+                  >
+                    {picksDates.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                )}
+                <button
+                  onClick={() => fetchPicksReport(selectedPickDate || undefined, true)}
+                  disabled={picksReportLoading}
+                  className="text-slate-400 hover:text-sky-400 disabled:opacity-50 transition-all"
+                  title="Refresh with today's live prices"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${picksReportLoading ? 'animate-spin text-sky-500' : ''}`} />
+                </button>
+              </div>
+            </div>
+
+            <p className="text-3xs text-slate-500 -mt-1">
+              How yesterday&apos;s 25 picks worked out — entry price vs today&apos;s live O/H/L &amp; current price.
+            </p>
+
+            {picksReportLoading ? (
+              <div className="py-8 flex items-center justify-center">
+                <RefreshCw className="animate-spin text-sky-500 w-5 h-5" />
+              </div>
+            ) : !picksReport || !picksReport.picks || picksReport.picks.length === 0 ? (
+              <p className="text-3xs text-slate-500 text-center py-4">
+                No archived picks yet. Picks are snapshotted each trading morning and scored after 3:30 PM close.
+              </p>
+            ) : (
+              <>
+                {/* Summary scorecard */}
+                {picksReport.summary && (
+                  <div className="grid grid-cols-4 gap-1.5 text-3xs text-center">
+                    <div className="bg-slate-950/40 rounded-xl p-2">
+                      <span className="text-slate-500">Win rate</span>
+                      <p className="font-bold text-emerald-300">{picksReport.summary.win_rate != null ? `${picksReport.summary.win_rate}%` : '—'}</p>
+                    </div>
+                    <div className="bg-slate-950/40 rounded-xl p-2">
+                      <span className="text-slate-500">W / L</span>
+                      <p className="font-bold"><span className="text-emerald-300">{picksReport.summary.wins}</span><span className="text-slate-600"> / </span><span className="text-red-300">{picksReport.summary.losses}</span></p>
+                    </div>
+                    <div className="bg-slate-950/40 rounded-xl p-2">
+                      <span className="text-slate-500">Avg move</span>
+                      <p className={`font-bold ${(picksReport.summary.avg_change_pct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{picksReport.summary.avg_change_pct != null ? `${picksReport.summary.avg_change_pct > 0 ? '+' : ''}${picksReport.summary.avg_change_pct}%` : '—'}</p>
+                    </div>
+                    <div className="bg-slate-950/40 rounded-xl p-2">
+                      <span className="text-slate-500">Scored</span>
+                      <p className="font-bold text-slate-200">{picksReport.summary.evaluated}/{picksReport.summary.total}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Header row */}
+                <div className="flex items-center gap-2 px-2 text-3xs text-slate-500 font-semibold">
+                  <span className="w-4 flex-shrink-0">#</span>
+                  <span className="flex-1 min-w-0">Stock</span>
+                  <span className="w-12 text-right flex-shrink-0">Entry</span>
+                  <span className="w-24 text-right flex-shrink-0">O / H / L</span>
+                  <span className="w-12 text-right flex-shrink-0">LTP</span>
+                  <span className="w-12 text-right flex-shrink-0">Chg</span>
+                </div>
+
+                <div className="flex flex-col gap-1 max-h-[28rem] overflow-y-auto pr-1">
+                  {picksReport.picks.map((p: any) => (
+                    <button
+                      key={p.symbol}
+                      onClick={() => setSelectedSymbol(p.symbol)}
+                      className={`w-full text-left p-2 border rounded-xl text-3xs flex items-center gap-2 transition-all ${
+                        p.symbol === selectedSymbol ? 'bg-sky-950/20 border-sky-500/40' : 'bg-slate-950/30 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <span className={`w-4 flex-shrink-0 font-bold ${
+                        p.outcome === 'WIN' ? 'text-emerald-400' : p.outcome === 'LOSS' ? 'text-red-400' : 'text-slate-500'
+                      }`}>{p.rank}</span>
+                      <span className="flex-1 min-w-0 font-bold text-slate-200 truncate">{p.symbol}</span>
+                      <span className="w-12 text-right flex-shrink-0 text-slate-400">₹{p.entry_price?.toFixed(1)}</span>
+                      <span className="w-24 text-right flex-shrink-0 text-slate-500 tabular-nums">
+                        {p.open != null ? `${p.open.toFixed(0)}/${p.high.toFixed(0)}/${p.low.toFixed(0)}` : '—'}
+                      </span>
+                      <span className="w-12 text-right flex-shrink-0 font-bold text-slate-200">{p.current != null ? `₹${p.current.toFixed(1)}` : '—'}</span>
+                      <span className={`w-12 text-right flex-shrink-0 font-bold ${
+                        p.change_pct == null ? 'text-slate-600' : p.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'
+                      }`}>
+                        {p.change_pct == null ? '—' : `${p.change_pct > 0 ? '+' : ''}${p.change_pct}%`}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Breakout Scanner Panel */}
+          <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-3 mb-6">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-2">
+                <Rocket className="text-fuchsia-400 w-4 h-4" />
+                <h2 className="text-sm font-bold">Breakout Scanner</h2>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setShowCatalog(v => !v)}
+                  className="text-3xs text-slate-400 hover:text-fuchsia-300 transition-all"
+                  title="Pattern guide"
+                >
+                  {showCatalog ? 'Hide guide' : 'Pattern guide'}
+                </button>
+                <button
+                  onClick={fetchBreakoutReady}
+                  disabled={breakoutLoading}
+                  className="text-slate-400 hover:text-fuchsia-400 disabled:opacity-50 transition-all"
+                  title="Rescan"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${breakoutLoading ? 'animate-spin text-fuchsia-500' : ''}`} />
+                </button>
+              </div>
+            </div>
+
+            <p className="text-3xs text-slate-500 -mt-1">
+              Stocks coiled &amp; ready to break out, ranked by readiness (VCP, Darvas Box, squeeze, triangles, flags).
+            </p>
+
+            {/* Pattern name filter */}
+            {breakoutReady.length > 0 && (() => {
+              const patterns = Array.from(new Set(breakoutReady.map((b) => b.top_pattern).filter(Boolean))).sort();
+              const matchCount = breakoutFilter === 'all'
+                ? breakoutReady.length
+                : breakoutReady.filter((b) => b.top_pattern === breakoutFilter).length;
+              return (
+                <div className="flex items-center gap-2">
+                  <Filter className="text-fuchsia-400/70 w-3 h-3 flex-shrink-0" />
+                  <select
+                    value={breakoutFilter}
+                    onChange={(e) => setBreakoutFilter(e.target.value)}
+                    className="flex-1 bg-slate-950/60 border border-slate-800 rounded-lg px-2 py-1 text-3xs text-slate-200 focus:outline-none focus:border-fuchsia-500/50"
+                  >
+                    <option value="all">All patterns ({breakoutReady.length})</option>
+                    {patterns.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                  </select>
+                  <span className="text-3xs text-slate-500 flex-shrink-0">{matchCount} match{matchCount === 1 ? '' : 'es'}</span>
+                </div>
+              );
+            })()}
+
+            {/* Pattern guide (advantage / disadvantage) */}
+            {showCatalog && (
+              <div className="max-h-72 overflow-y-auto pr-1 space-y-1.5 bg-slate-950/40 border border-slate-800/50 rounded-2xl p-2">
+                {catalog.map((p) => (
+                  <div key={p.pattern} className="text-3xs border-b border-slate-800/50 pb-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`px-1 py-0.5 rounded text-3xs font-bold ${p.signal === 'BULLISH' ? 'bg-emerald-900/50 text-emerald-300' : p.signal === 'BEARISH' ? 'bg-red-900/50 text-red-300' : 'bg-slate-800 text-slate-300'}`}>{p.signal}</span>
+                      <span className="font-bold text-slate-200">{p.label}</span>
+                      <span className="text-slate-600 ml-auto uppercase">{p.category}</span>
+                    </div>
+                    <p className="text-emerald-400/80 mt-0.5"><span className="text-slate-500">+ </span>{p.advantage}</p>
+                    <p className="text-red-400/70"><span className="text-slate-500">− </span>{p.disadvantage}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1.5 max-h-[26rem] overflow-y-auto pr-1">
+              {breakoutLoading ? (
+                <div className="py-8 flex items-center justify-center">
+                  <RefreshCw className="animate-spin text-fuchsia-500 w-5 h-5" />
+                </div>
+              ) : (
+                breakoutReady
+                  .filter((b) => breakoutFilter === 'all' || b.top_pattern === breakoutFilter)
+                  .map((b) => (
+                  <button
+                    key={b.symbol}
+                    onClick={() => setSelectedSymbol(b.symbol)}
+                    className="flex items-center gap-2 text-2xs p-2 rounded-2xl hover:bg-slate-800/40 border border-transparent hover:border-slate-700/50 transition-all text-left"
+                  >
+                    <div className="flex flex-col items-center justify-center w-9 flex-shrink-0">
+                      <span className={`text-sm font-extrabold ${b.readiness >= 80 ? 'text-fuchsia-300' : b.readiness >= 65 ? 'text-amber-300' : 'text-slate-300'}`}>{b.readiness}</span>
+                      <span className="text-3xs text-slate-600">ready</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-slate-200">{b.symbol}</span>
+                        <span className={`px-1 py-0.5 rounded text-3xs font-bold ${b.signal === 'BULLISH' ? 'bg-emerald-900/50 text-emerald-300' : b.signal === 'BEARISH' ? 'bg-red-900/50 text-red-300' : 'bg-slate-800 text-slate-300'}`}>{b.signal}</span>
+                      </div>
+                      <span className="text-3xs text-fuchsia-300/90 truncate block font-semibold">{b.top_pattern}</span>
+                      <span className="text-3xs text-slate-500 block">
+                        B/O ₹{b.nearest_breakout != null ? b.nearest_breakout.toFixed(1) : '—'} · {b.confidence}% conf
+                      </span>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <span className="font-bold text-slate-200 block">₹{b.price?.toFixed(1)}</span>
+                      <span className={`text-3xs font-semibold ${b.status === 'BREAKOUT' ? 'text-fuchsia-300' : b.status === 'READY' ? 'text-emerald-400' : 'text-slate-400'}`}>{b.status}</span>
+                    </div>
+                    {b.pct_to_breakout != null && (
+                      <div className="flex-shrink-0 w-12 text-right">
+                        <span className="text-3xs text-slate-500 block">to b/o</span>
+                        <span className={`text-3xs font-bold ${b.signal === 'BULLISH' ? 'text-emerald-300' : 'text-slate-300'}`}>{b.pct_to_breakout > 0 ? '+' : ''}{b.pct_to_breakout}%</span>
+                      </div>
+                    )}
+                  </button>
+                ))
+              )}
+              {!breakoutLoading && breakoutReady.length === 0 && (
+                <p className="text-3xs text-slate-500 text-center py-4">No breakout setups detected right now.</p>
+              )}
+              {!breakoutLoading && breakoutReady.length > 0 && breakoutFilter !== 'all' &&
+                breakoutReady.filter((b) => b.top_pattern === breakoutFilter).length === 0 && (
+                <p className="text-3xs text-slate-500 text-center py-4">No stocks match this pattern right now.</p>
+              )}
+            </div>
+          </div>
+
           <div className="w-full bg-slate-900/40 backdrop-blur-md border border-slate-800/80 rounded-2xl shadow-xl p-5 flex flex-col gap-4">
             <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
               <Filter className="text-emerald-400 w-4 h-4" />

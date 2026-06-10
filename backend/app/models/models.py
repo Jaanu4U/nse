@@ -101,6 +101,15 @@ class TechnicalIndicator(Base):
     ichimoku_kijun = Column(Numeric(12, 2), nullable=True)
     ichimoku_senkou_a = Column(Numeric(12, 2), nullable=True)
     ichimoku_senkou_b = Column(Numeric(12, 2), nullable=True)
+    # Additional momentum / volume / volatility indicators
+    stoch_k = Column(Numeric(6, 2), nullable=True)
+    stoch_d = Column(Numeric(6, 2), nullable=True)
+    mfi = Column(Numeric(6, 2), nullable=True)
+    cci = Column(Numeric(12, 2), nullable=True)
+    williams_r = Column(Numeric(6, 2), nullable=True)
+    obv = Column(Numeric(24, 2), nullable=True)
+    supertrend = Column(Numeric(12, 2), nullable=True)
+    supertrend_dir = Column(Integer, nullable=True)  # +1 bullish, -1 bearish
     
     stock = relationship("Stock", back_populates="technical_indicators")
 
@@ -127,7 +136,7 @@ class News(Base):
     id = Column(Integer, primary_key=True, index=True)
     stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(500), nullable=False)
-    url = Column(String(500), unique=True, nullable=False)
+    url = Column(String(1000), unique=True, nullable=False)
     source = Column(String(100), nullable=False)
     published_at = Column(DateTime(timezone=True), nullable=False, index=True)
     content = Column(String, nullable=True)
@@ -269,6 +278,52 @@ class InsiderTrade(Base):
     transaction_date = Column(Date, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
+    stock = relationship("Stock")
+
+
+class DailyPick(Base):
+    """
+    Daily snapshot of the Top-25 High-Probability Picks for backtesting/archive.
+    Each row is one stock recommended on `pick_date`, with the entry reference price
+    captured at pick time and the realised intraday OHLC filled in after market close.
+    """
+    __tablename__ = "daily_picks"
+    __table_args__ = (
+        UniqueConstraint("pick_date", "symbol", name="uq_daily_pick_date_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    pick_date = Column(Date, nullable=False, index=True)
+    rank = Column(Integer, nullable=False)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    company_name = Column(String(255), nullable=True)
+    industry = Column(String(100), nullable=True)
+
+    # Reference price + signal snapshot captured when the pick was made
+    entry_price = Column(Numeric(12, 2), nullable=False)
+    confidence = Column(Numeric(6, 2), nullable=True)
+    ml_score = Column(Numeric(6, 2), nullable=True)
+    sentiment = Column(Numeric(5, 2), nullable=True)
+    prob_plus_1 = Column(Numeric(6, 2), nullable=True)
+    prob_plus_2 = Column(Numeric(6, 2), nullable=True)
+    prob_plus_3 = Column(Numeric(6, 2), nullable=True)
+    prob_plus_5 = Column(Numeric(6, 2), nullable=True)
+    rsi = Column(Numeric(6, 2), nullable=True)
+    supertrend_dir = Column(Integer, nullable=True)
+
+    # Realised outcome (filled after market close / on live refresh)
+    eval_date = Column(Date, nullable=True)
+    eval_open = Column(Numeric(12, 2), nullable=True)
+    eval_high = Column(Numeric(12, 2), nullable=True)
+    eval_low = Column(Numeric(12, 2), nullable=True)
+    eval_price = Column(Numeric(12, 2), nullable=True)  # current / closing price
+    change_pct = Column(Numeric(8, 2), nullable=True)   # (eval_price - entry_price) / entry_price * 100
+    outcome = Column(String(10), nullable=False, default="PENDING")  # WIN | LOSS | FLAT | PENDING
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
     stock = relationship("Stock")
 
 

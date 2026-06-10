@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.repositories.price_repo import PriceRepository
 from app.repositories.stock_repo import StockRepository
 import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 

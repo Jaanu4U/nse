@@ -175,3 +175,71 @@ def get_ai_report(symbol: str, db: Session = Depends(get_db)):
     analyst = AIAnalystService(db)
     report_md = analyst.generate_stock_report(symbol)
     return {"report": report_md}
+
+
+@router.get("/{symbol}/analytics")
+def get_quant_analytics(symbol: str, db: Session = Depends(get_db)):
+    """Risk-adjusted metrics, trend strength and ATR-based trade levels."""
+    stock_repo = StockRepository(db)
+    if not stock_repo.get_by_symbol(symbol):
+        raise HTTPException(status_code=404, detail="Stock not found")
+    from app.services.analytics import AnalyticsEngine
+    return AnalyticsEngine(db).full_analytics(symbol)
+
+
+@router.get("/{symbol}/backtest")
+def get_prediction_backtest(symbol: str, threshold: float = 0.01, db: Session = Depends(get_db)):
+    """Walk-forward accuracy / hit-rate of the next-day prediction model."""
+    stock_repo = StockRepository(db)
+    if not stock_repo.get_by_symbol(symbol):
+        raise HTTPException(status_code=404, detail="Stock not found")
+    from app.services.analytics import AnalyticsEngine
+    return AnalyticsEngine(db).backtest_prediction(symbol, threshold=threshold)
+
+
+@router.get("/{symbol}/extra-indicators")
+def get_extra_indicators(symbol: str, db: Session = Depends(get_db)):
+    """
+    Additional technical indicators computed on the fly: Parabolic SAR, Donchian &
+    Keltner channels, Chaikin Money Flow, TTM Squeeze, Aroon, Vortex, TRIX,
+    Fibonacci levels, Heikin-Ashi and the Chandelier Exit.
+    """
+    stock_repo = StockRepository(db)
+    if not stock_repo.get_by_symbol(symbol):
+        raise HTTPException(status_code=404, detail="Stock not found")
+    from app.services.technical_analysis import TechnicalAnalysisEngine
+    return TechnicalAnalysisEngine(db).compute_extra_indicators(symbol)
+
+
+@router.get("/{symbol}/fundamentals")
+def get_fundamentals(symbol: str, force: bool = False, db: Session = Depends(get_db)):
+    """
+    Real fundamentals via yfinance (PE/PB/ROE/ROCE/EPS/D-E, revenue, FCF, growth)
+    plus a DCF intrinsic-value estimate. Fetched lazily and cached; ratios are
+    persisted so the screener can filter on them.
+    """
+    stock_repo = StockRepository(db)
+    if not stock_repo.get_by_symbol(symbol):
+        raise HTTPException(status_code=404, detail="Stock not found")
+    from app.services.fundamentals import FundamentalsService
+    return FundamentalsService(db).get_fundamentals(symbol, force=force)
+
+
+@router.get("/{symbol}/correlation")
+def get_correlation(symbol: str, days: int = 90, db: Session = Depends(get_db)):
+    """Correlation of daily returns vs the NIFTY benchmark and same-sector peers."""
+    stock_repo = StockRepository(db)
+    if not stock_repo.get_by_symbol(symbol):
+        raise HTTPException(status_code=404, detail="Stock not found")
+    from app.services.market_structure import MarketStructureService
+    return MarketStructureService(db).correlation(symbol, days=days)
+
+
+@router.get("/{symbol}/breakouts")
+def get_breakouts(symbol: str, db: Session = Depends(get_db)):
+    """Detected breakout patterns and the stock's breakout-readiness score."""
+    stock_repo = StockRepository(db)
+    if not stock_repo.get_by_symbol(symbol):
+        raise HTTPException(status_code=404, detail="Stock not found")
+    from app.services.breakout_detection import BreakoutDetectionEngine
+    return BreakoutDetectionEngine(db).detect_for_symbol(symbol)

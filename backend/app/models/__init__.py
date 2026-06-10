@@ -15,4 +15,5 @@ from app.models.models import (
     DetectedPattern,
     Financial,
     QuarterlyResult,
+    DailyPick,
 )

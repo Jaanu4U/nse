@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 
-export const API_BASE = "http://localhost:8000/api/v1";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
+
+// Build request headers, attaching the bearer token only when logged in.
+// Public (no-login) users still get a valid response from the backend, which
+// falls back to a shared public account for watchlists/portfolios.
+const authHeaders = (token: string | null, extra: Record<string, string> = {}): Record<string, string> =>
+  token ? { Authorization: `Bearer ${token}`, ...extra } : { ...extra };
 
 export interface Stock {
   id: number;
@@ -122,11 +128,9 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   fetchWatchlists: async () => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/watchlists`, {
-        headers: { "Authorization": `Bearer ${token}` }
+        headers: authHeaders(get().token)
       });
       if (res.ok) {
         const data = await res.json();
@@ -141,11 +145,9 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   fetchPortfolios: async () => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/portfolios`, {
-        headers: { "Authorization": `Bearer ${token}` }
+        headers: authHeaders(get().token)
       });
       if (res.ok) {
         const data = await res.json();
@@ -163,11 +165,9 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   fetchPortfolioDetail: async (id: number) => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/portfolios/${id}`, {
-        headers: { "Authorization": `Bearer ${token}` }
+        headers: authHeaders(get().token)
       });
       if (res.ok) {
         const data = await res.json();
@@ -179,15 +179,10 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   createWatchlist: async (name: string) => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/watchlists`, {
         method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
+        headers: authHeaders(get().token, { "Content-Type": "application/json" }),
         body: JSON.stringify({ name })
       });
       if (res.ok) {
@@ -199,12 +194,10 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   addToWatchlist: async (watchlistId: number, symbol: string) => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/watchlists/${watchlistId}/items/${symbol}`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${token}` }
+        headers: authHeaders(get().token)
       });
       if (res.ok) {
         await get().fetchWatchlists();
@@ -215,12 +208,10 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   removeFromWatchlist: async (watchlistId: number, symbol: string) => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/watchlists/${watchlistId}/items/${symbol}`, {
         method: "DELETE",
-        headers: { "Authorization": `Bearer ${token}` }
+        headers: authHeaders(get().token)
       });
       if (res.ok) {
         await get().fetchWatchlists();
@@ -231,15 +222,10 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   createPortfolio: async (name: string) => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/portfolios`, {
         method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
+        headers: authHeaders(get().token, { "Content-Type": "application/json" }),
         body: JSON.stringify({ name })
       });
       if (res.ok) {
@@ -251,15 +237,10 @@ export const useStockStore = create<StockState>((set, get) => ({
   },
 
   addTransaction: async (portfolioId, symbol, txType, qty, price, date, charges = 0.0) => {
-    const token = get().token;
-    if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/portfolios/${portfolioId}/transactions`, {
         method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
+        headers: authHeaders(get().token, { "Content-Type": "application/json" }),
         body: JSON.stringify({
           symbol: symbol.toUpperCase(),
           transaction_type: txType.toUpperCase(),

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ML model artifacts (regenerable, large binaries)
+backend/models/*.pkl
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+.npm/
+
+# Env / secrets
+.env
+.env.*
+*.local
+
+# Logs / temp
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.swp

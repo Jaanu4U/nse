@@ -13,6 +13,10 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Special non-tradable benchmark used for relative-strength / beta features.
+NIFTY_INDEX_SYMBOL = "NIFTY50IDX"
+NIFTY_INDEX_YF_TICKER = "^NSEI"
+
 # Pre-defined list of Nifty 50 stocks for offline / fallback sync
 FALLBACK_STOCKS = [
     {"symbol": "RELIANCE", "company_name": "Reliance Industries Limited", "industry": "Oil Gas & Fuels"},
@@ -113,11 +117,12 @@ class DataCollectionEngine:
         logger.info(f"Synced {len(fallback_data)} fallback stocks.")
         return len(fallback_data)
 
-    def download_historical_ohlcv(self, symbol: str, start_date: datetime.date, end_date: datetime.date, retry_count: int = 3) -> int:
+    def download_historical_ohlcv(self, symbol: str, start_date: datetime.date, end_date: datetime.date, retry_count: int = 3, yf_ticker: Optional[str] = None) -> int:
         """
         Download historical daily data for a symbol via yfinance and upsert to database.
+        `yf_ticker` overrides the default `{symbol}.NS` ticker (used for indices like ^NSEI).
         """
-        yf_symbol = f"{symbol}.NS"
+        yf_symbol = yf_ticker if yf_ticker else f"{symbol}.NS"
         logger.info(f"Downloading historical daily data for {symbol} ({start_date} to {end_date})")
         
         # Load stock record to get ID
@@ -179,6 +184,33 @@ class DataCollectionEngine:
                 time.sleep(1.5 * (attempt + 1))
                 
         return 0
+
+    def ensure_index(self, start_date: datetime.date = None, end_date: datetime.date = None) -> int:
+        """
+        Ensure the NIFTY 50 benchmark index exists and has recent price history.
+        Used to derive relative-strength and beta features. Returns candle count.
+        """
+        if start_date is None:
+            start_date = datetime.date.today() - datetime.timedelta(days=365 * 3)
+        if end_date is None:
+            end_date = datetime.date.today() + datetime.timedelta(days=1)
+
+        idx_stock = self.stock_repo.get_by_symbol(NIFTY_INDEX_SYMBOL)
+        if not idx_stock:
+            idx_stock = self.stock_repo.create(
+                symbol=NIFTY_INDEX_SYMBOL,
+                company_name="NIFTY 50 Index",
+                series="INDEX",
+                industry="Index",
+            )
+            # Keep the benchmark out of the tradable universe (screener / top-picks).
+            idx_stock.is_active = False
+            self.db.add(idx_stock)
+            self.db.commit()
+
+        return self.download_historical_ohlcv(
+            NIFTY_INDEX_SYMBOL, start_date, end_date, yf_ticker=NIFTY_INDEX_YF_TICKER
+        )
 
     def download_intraday_ohlcv(self, symbol: str, interval: str = "15m", period: str = "5d") -> int:
         """
