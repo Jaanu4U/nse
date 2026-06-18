@@ -341,4 +341,53 @@ class OptionChainMetric(Base):
     stock = relationship("Stock")
 
 
+class StrategyPick(Base):
+    """
+    Intraday "Strategy 3% · 3:20 PM" snapshot.
+
+    Ten minutes before the NSE close the live price is treated as the day's close, the
+    full prediction pipeline is re-run on it, and the Top-N by P(+3%) are captured here
+    with the entry reference price (the 3:20 PM live price). After the NEXT trading
+    session settles, the realised next-day OHLC is filled in and each pick is graded by
+    how far the next day's HIGH ran above the entry (entry -> next-high %).
+    """
+    __tablename__ = "strategy_picks"
+    __table_args__ = (
+        UniqueConstraint("pick_date", "session", "symbol",
+                         name="uq_strategy_pick_date_session_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    pick_date = Column(Date, nullable=False, index=True)
+    session = Column(String(8), nullable=False, default="1520")  # intraday session tag
+    rank = Column(Integer, nullable=False)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    company_name = Column(String(255), nullable=True)
+    industry = Column(String(100), nullable=True)
+
+    # Entry reference (3:20 PM live price used as the day's close) + signal snapshot
+    entry_price = Column(Numeric(12, 2), nullable=False)
+    prob_plus_2 = Column(Numeric(6, 2), nullable=True)
+    prob_plus_3 = Column(Numeric(6, 2), nullable=True)
+    rsi = Column(Numeric(6, 2), nullable=True)
+    supertrend_dir = Column(Integer, nullable=True)
+
+    # Realised next-session outcome (filled by the post-1 AM evaluation job)
+    result_date = Column(Date, nullable=True)
+    next_open = Column(Numeric(12, 2), nullable=True)
+    next_high = Column(Numeric(12, 2), nullable=True)
+    next_low = Column(Numeric(12, 2), nullable=True)
+    next_close = Column(Numeric(12, 2), nullable=True)
+    ch_pct = Column(Numeric(8, 2), nullable=True)   # entry -> next HIGH %
+    cc_pct = Column(Numeric(8, 2), nullable=True)   # entry -> next CLOSE %
+    outcome = Column(String(10), nullable=False, default="PENDING")  # WIN | LOSS | PENDING
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    stock = relationship("Stock")
+
+
+
 

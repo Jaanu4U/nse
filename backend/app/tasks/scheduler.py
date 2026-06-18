@@ -28,6 +28,10 @@ def run_daily_sync():
         # 2. Ingest daily prices (incremental update)
         set_progress(current=2, message="Downloading latest prices")
         collector.incremental_update()
+
+        # 2b. Prune the tradable universe to the liquid tier so all downstream
+        # work (indicators, predictions, picks) runs only on liquid names.
+        collector.prune_to_liquid_universe()
         
         # 3. Apply corporate actions
         set_progress(current=3, message="Applying corporate actions")
@@ -113,10 +117,10 @@ def start_scheduler():
         id='hourly_news_job'
     )
 
-    # Snapshot the Top-25 high-probability picks every trading morning (09:10 IST,
+    # Snapshot the Top-5 high-probability picks every trading morning (09:10 IST,
     # before market open) so the day's recommendations are archived for scoring.
     def snapshot_picks_job():
-        logger.info("Snapshotting daily Top-25 picks...")
+        logger.info("Snapshotting daily Top-5 picks...")
         db = SessionLocal()
         try:
             from app.services.daily_picks import DailyPicksService
@@ -138,7 +142,7 @@ def start_scheduler():
     # After market close (15:45 IST) score how many of today's picks worked out
     # by fetching the realised intraday OHLC and flagging WIN/LOSS.
     def evaluate_picks_job():
-        logger.info("Evaluating daily Top-25 picks after close...")
+        logger.info("Evaluating daily Top-5 picks after close...")
         db = SessionLocal()
         try:
             from app.services.daily_picks import DailyPicksService
@@ -155,6 +159,50 @@ def start_scheduler():
         hour=15,
         minute=45,
         id='evaluate_picks_job'
+    )
+
+    # "Strategy 3% · 3:20 PM": ten minutes before the NSE close, treat the live price as
+    # today's close, re-run the prediction pipeline on the liquid universe and snapshot
+    # the Top-5 by P(+3%) so they are actionable before the 15:30 close.
+    def intraday_strategy_job():
+        logger.info("Running 3:20 PM intraday strategy (Top-5 by P(+3%))...")
+        db = SessionLocal()
+        try:
+            from app.services.intraday_strategy import IntradayStrategyService
+            IntradayStrategyService(db).run_strategy(top_n=5, force=True)
+        except Exception as e:
+            logger.error(f"Error running intraday strategy: {e}")
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        intraday_strategy_job,
+        'cron',
+        day_of_week='mon-fri',
+        hour=15,
+        minute=20,
+        id='intraday_strategy_job'
+    )
+
+    # After 1 AM IST (next session's close already settled by the prior evening sync),
+    # grade any still-pending 3:20 PM picks against the realised next-day HIGH.
+    def evaluate_intraday_strategy_job():
+        logger.info("Evaluating 3:20 PM strategy picks against realised next-day high...")
+        db = SessionLocal()
+        try:
+            from app.services.intraday_strategy import IntradayStrategyService
+            IntradayStrategyService(db).evaluate()
+        except Exception as e:
+            logger.error(f"Error evaluating intraday strategy: {e}")
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        evaluate_intraday_strategy_job,
+        'cron',
+        hour=1,
+        minute=0,
+        id='evaluate_intraday_strategy_job'
     )
 
     scheduler.start()

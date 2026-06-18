@@ -335,12 +335,16 @@ class AnalyticsEngine:
         if X is None or len(X) < 150:
             return {"error": "insufficient_data"}
 
-        model_path = os.path.join(MODEL_DIR, f"{symbol}_models.pkl")
+        # Use the configured backend's saved model (path + wrapper format match
+        # PredictionEngine). Falls back to training if it isn't on disk yet.
+        model_type = engine._resolve_model_type(None)
+        model_path = engine._model_path(symbol, model_type)
         if not os.path.exists(model_path):
-            if not engine.train_models(symbol):
+            if not engine.train_models(symbol, model_type):
                 return {"error": "no_model"}
         with open(model_path, "rb") as f:
-            models = pickle.load(f)
+            wrapper = pickle.load(f)
+        models = wrapper["models"] if isinstance(wrapper, dict) and "models" in wrapper else wrapper
 
         model = models.get(threshold)
         # Evaluate on the most recent 20% of rows that have a known next-day target.
@@ -359,6 +363,9 @@ class AnalyticsEngine:
             probs = np.full(len(Xe), model)
         elif model is None:
             return {"error": "no_threshold_model"}
+        elif isinstance(model, list):
+            # Ensemble backend: average the positive-class probabilities of each estimator.
+            probs = np.mean([m.predict_proba(Xe)[:, 1] for m in model], axis=0)
         else:
             probs = model.predict_proba(Xe)[:, 1]
 

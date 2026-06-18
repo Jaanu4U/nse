@@ -79,11 +79,12 @@ class SentimentAnalysisEngine:
                 else:
                     sentiment_class = "NEUTRAL"
 
+                source = (item.source.text if item.source else "Google News") or "Google News"
                 new_news = News(
                     stock_id=stock.id,
-                    title=title,
-                    url=link,
-                    source=item.source.text if item.source else "Google News",
+                    title=title[:500],
+                    url=link[:1000],
+                    source=source[:100],
                     published_at=published_at,
                     sentiment_score=compound_score,
                     sentiment_class=sentiment_class
@@ -98,6 +99,9 @@ class SentimentAnalysisEngine:
             return new_articles
             
         except Exception as e:
+            # Roll back so a failed flush (e.g. data-too-long) does not poison the
+            # session and cascade into every subsequent stock / daily-sync step.
+            self.db.rollback()
             logger.error(f"Failed to fetch/analyze news for {symbol}: {e}")
             return 0
 

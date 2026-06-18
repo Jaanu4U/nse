@@ -1,9 +1,9 @@
 """
-Daily Top-25 High-Probability Picks archive & scorecard.
+Daily Top-5 High-Probability Picks archive & scorecard.
 
 Workflow
 --------
-1. snapshot_today()   – capture the current Top-25 picks for `pick_date` with the
+1. snapshot_today()   – capture the current Top-5 picks for `pick_date` with the
                         entry reference price (latest close at pick time).
 2. evaluate_picks()   – after market close (~15:30 IST) fetch the realised intraday
                         OHLC for each pick, compute the % move vs the entry price and
@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 # A move smaller than this (in %) is treated as flat rather than a win/loss.
 FLAT_THRESHOLD = 0.10
 
+# Short-lived cache for live quote batches so repeated scorecard loads (every visitor
+# hits the current-day live refresh) don't spam yfinance and risk rate limiting. Kept
+# below the frontend's 30s live-poll interval so each poll returns fresh intraday OHLC.
+_LIVE_QUOTE_CACHE: Dict[frozenset, "tuple[float, Dict[str, Dict[str, float]]]"] = {}
+_LIVE_QUOTE_TTL_SECONDS = 20
+
 
 class DailyPicksService:
     def __init__(self, db: Session):
@@ -39,7 +45,7 @@ class DailyPicksService:
     # ------------------------------------------------------------------ #
     # Snapshot
     # ------------------------------------------------------------------ #
-    def snapshot_today(self, limit: int = 25, force: bool = False,
+    def snapshot_today(self, limit: int = 5, force: bool = False,
                        pick_date: Optional[datetime.date] = None) -> Dict[str, Any]:
         """Capture the current Top-N picks for `pick_date` (default today, IST)."""
         pick_date = pick_date or self._today_ist()
@@ -105,6 +111,13 @@ class DailyPicksService:
         if not symbols:
             return {}
 
+        # Serve from the short TTL cache when fresh to avoid repeated yfinance hits.
+        import time
+        key = frozenset(symbols)
+        cached = _LIVE_QUOTE_CACHE.get(key)
+        if cached and (time.time() - cached[0]) < _LIVE_QUOTE_TTL_SECONDS:
+            return cached[1]
+
         tickers = [f"{s}.NS" for s in symbols]
         quotes: Dict[str, Dict[str, float]] = {}
         try:
@@ -141,6 +154,8 @@ class DailyPicksService:
             except Exception:
                 continue
 
+        if quotes:
+            _LIVE_QUOTE_CACHE[key] = (time.time(), quotes)
         return quotes
 
     # ------------------------------------------------------------------ #
@@ -237,8 +252,15 @@ class DailyPicksService:
                 return {"pick_date": None, "summary": None, "picks": []}
             pick_date = latest[0]
 
-        if refresh:
-            self.evaluate_picks(pick_date=pick_date, eval_date=self._today_ist())
+        # Auto-refresh live quotes for the current trading day. The morning snapshot
+        # (09:10 IST) archives the day's picks as PENDING with no OHLC, and the scheduled
+        # evaluation only runs after close (15:45 IST). Without this, the scorecard for the
+        # freshly rolled-over day renders empty until the evening. Refreshing live quotes
+        # whenever the report is for *today* keeps the live price + running win/loss fresh
+        # so the scorecard always displays with current prices intraday.
+        today = self._today_ist()
+        if refresh or pick_date == today:
+            self.evaluate_picks(pick_date=pick_date, eval_date=today)
 
         picks = (
             self.db.query(DailyPick)

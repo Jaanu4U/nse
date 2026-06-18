@@ -17,7 +17,13 @@ class Settings(BaseSettings):
     
     # Gemini AI settings
     GEMINI_API_KEY: str = ""
-    
+
+    # Next-day prediction model backend.
+    # One of: "ensemble" (XGBoost + LightGBM averaged, default), "xgb", "lgbm", "lstm".
+    # "lstm" requires TensorFlow and is only used for on-demand single-symbol predictions;
+    # the full-universe run always falls back to the boosting ensemble for speed.
+    PREDICTION_MODEL: str = "ensemble"
+
     # CORS Origins
     BACKEND_CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 

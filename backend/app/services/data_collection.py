@@ -9,6 +9,7 @@ import time
 from sqlalchemy.orm import Session
 from app.repositories.stock_repo import StockRepository
 from app.repositories.price_repo import PriceRepository
+from app.models.models import Stock
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,14 @@ logger = logging.getLogger(__name__)
 # Special non-tradable benchmark used for relative-strength / beta features.
 NIFTY_INDEX_SYMBOL = "NIFTY50IDX"
 NIFTY_INDEX_YF_TICKER = "^NSEI"
+
+# Liquid universe definition. The full NSE EQ list is ~2100 names, but high-probability
+# ML picks are only meaningful on stocks that are actually tradeable. To stop wasting
+# compute (price pulls, indicators, model training) on illiquid micro-caps the active
+# universe is pruned to names whose recent average daily traded value clears this floor.
+LIQUID_UNIVERSE_MIN_TURNOVER = 250_000_000   # ₹25 Cr avg daily traded value (~top-630 names)
+LIQUID_UNIVERSE_WINDOW_DAYS = 30
+LIQUID_UNIVERSE_MIN_PRICE = 20.0             # drop sub-₹20 penny stocks
 
 # Pre-defined list of Nifty 50 stocks for offline / fallback sync
 FALLBACK_STOCKS = [
@@ -95,7 +104,7 @@ class DataCollectionEngine:
                     })
             
             if stocks_to_sync:
-                self.stock_repo.bulk_create_or_update(stocks_to_sync)
+                self.stock_repo.bulk_create_or_update(stocks_to_sync, update_active=False)
                 logger.info(f"Successfully synced {len(stocks_to_sync)} stocks from NSE.")
                 return len(stocks_to_sync)
                 
@@ -113,9 +122,83 @@ class DataCollectionEngine:
                 "is_active": True
             } for s in FALLBACK_STOCKS
         ]
-        self.stock_repo.bulk_create_or_update(fallback_data)
+        self.stock_repo.bulk_create_or_update(fallback_data, update_active=False)
         logger.info(f"Synced {len(fallback_data)} fallback stocks.")
         return len(fallback_data)
+
+    def prune_to_liquid_universe(
+        self,
+        min_turnover: float = LIQUID_UNIVERSE_MIN_TURNOVER,
+        window_days: int = LIQUID_UNIVERSE_WINDOW_DAYS,
+        min_price: float = LIQUID_UNIVERSE_MIN_PRICE,
+    ) -> dict:
+        """
+        Restrict the tradable universe to the most liquid names.
+
+        High-probability ML picks are only meaningful on stocks that are actually
+        tradeable, so names whose recent average daily traded value (close * volume)
+        is below ``min_turnover`` are marked inactive. This keeps data collection,
+        indicator calculation and model training focused on the liquid tier instead
+        of the full ~2100-name EQ list. The benchmark index is always kept inactive.
+
+        Returns a summary dict with the activated / deactivated counts.
+        """
+        from sqlalchemy import text
+
+        # Compute average turnover over the recent window per stock.
+        cutoff_row = self.db.execute(text("SELECT MAX(timestamp) FROM prices_daily")).first()
+        if not cutoff_row or cutoff_row[0] is None:
+            logger.warning("prune_to_liquid_universe: no price data, skipping.")
+            return {"activated": 0, "deactivated": 0, "skipped": True}
+
+        latest_ts = cutoff_row[0]
+        cutoff = latest_ts - datetime.timedelta(days=window_days)
+
+        liquid_rows = self.db.execute(
+            text(
+                """
+                SELECT p.stock_id
+                FROM prices_daily p
+                WHERE p.timestamp >= :cutoff
+                GROUP BY p.stock_id
+                HAVING AVG(p.close * p.volume) >= :min_turnover
+                   AND AVG(p.close) >= :min_price
+                """
+            ),
+            {"cutoff": cutoff, "min_turnover": min_turnover, "min_price": min_price},
+        ).fetchall()
+        liquid_ids = {r[0] for r in liquid_rows}
+
+        idx_stock = self.stock_repo.get_by_symbol(NIFTY_INDEX_SYMBOL)
+        idx_id = idx_stock.id if idx_stock else None
+
+        activated = 0
+        deactivated = 0
+        for stock in self.db.query(Stock).all():
+            if stock.id == idx_id:
+                if stock.is_active:
+                    stock.is_active = False
+                continue
+            should_be_active = stock.id in liquid_ids
+            if should_be_active and not stock.is_active:
+                stock.is_active = True
+                activated += 1
+            elif not should_be_active and stock.is_active:
+                stock.is_active = False
+                deactivated += 1
+        self.db.commit()
+
+        logger.info(
+            f"Liquid universe prune: {len(liquid_ids)} liquid names "
+            f"(+{activated} activated, -{deactivated} deactivated)."
+        )
+        return {
+            "liquid": len(liquid_ids),
+            "activated": activated,
+            "deactivated": deactivated,
+            "min_turnover": min_turnover,
+            "window_days": window_days,
+        }
 
     def download_historical_ohlcv(self, symbol: str, start_date: datetime.date, end_date: datetime.date, retry_count: int = 3, yf_ticker: Optional[str] = None) -> int:
         """
@@ -277,7 +360,10 @@ class DataCollectionEngine:
         for stock in active_stocks:
             latest_price = self.price_repo.get_latest_daily_price(stock.id)
             if latest_price:
-                start_date = latest_price.timestamp + datetime.timedelta(days=1)
+                # Re-download from the latest stored day (inclusive) so the most recent
+                # bar is refreshed. This corrects any provisional close written intraday
+                # by the 3:20 PM strategy run with the official EOD close (upsert).
+                start_date = latest_price.timestamp
             else:
                 # Default to last 3 years if empty
                 start_date = today - datetime.timedelta(days=365 * 3)

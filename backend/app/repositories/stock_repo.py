@@ -28,8 +28,10 @@ class StockRepository:
         self.db.refresh(db_stock)
         return db_stock
 
-    def bulk_create_or_update(self, stocks_data: List[dict]) -> List[Stock]:
-        # Perform upserts
+    def bulk_create_or_update(self, stocks_data: List[dict], update_active: bool = True) -> List[Stock]:
+        # Perform upserts. When update_active is False the is_active flag of
+        # *existing* rows is left untouched so the liquidity prune (which
+        # deactivates illiquid names) is not undone by the nightly master sync.
         updated_stocks = []
         for s in stocks_data:
             existing = self.get_by_symbol(s['symbol'])
@@ -37,7 +39,8 @@ class StockRepository:
                 existing.company_name = s.get('company_name', existing.company_name)
                 existing.isin = s.get('isin', existing.isin)
                 existing.industry = s.get('industry', existing.industry)
-                existing.is_active = s.get('is_active', existing.is_active)
+                if update_active:
+                    existing.is_active = s.get('is_active', existing.is_active)
                 updated_stocks.append(existing)
             else:
                 new_stock = Stock(

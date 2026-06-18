@@ -16,4 +16,5 @@ from app.models.models import (
     Financial,
     QuarterlyResult,
     DailyPick,
+    StrategyPick,
 )

@@ -10,6 +10,10 @@ ta==0.11.0
 scikit-learn==1.5.0
 xgboost==2.0.3
 lightgbm==4.3.0
+# Optional: enables the LSTM prediction backend (PREDICTION_MODEL=lstm).
+# Heavy (~400MB); leave commented unless you use the LSTM model. The engine
+# transparently falls back to the boosting ensemble when TensorFlow is absent.
+# tensorflow-cpu==2.16.1
 apscheduler==3.10.4
 yfinance==1.4.1
 requests==2.32.3
