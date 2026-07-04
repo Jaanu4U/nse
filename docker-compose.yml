@@ -78,8 +78,8 @@ services:
       - DB_NAME=nse_stock_db
       - DB_USER=postgres
       - DB_PASS=postgrespassword
-      - KITE_API_KEY=${KITE_API_KEY:-xcnose6lzs8vuzik}
-      - KITE_API_SECRET=${KITE_API_SECRET:-vmzp201xd63bkxj30ltxu7ccg3ko2dk3}
+      - KITE_API_KEY=${KITE_API_KEY:-}
+      - KITE_API_SECRET=${KITE_API_SECRET:-}
       - KITE_ACCESS_TOKEN=${KITE_ACCESS_TOKEN:-}
       - SPRING_FLYWAY_ENABLED=false
     ports:

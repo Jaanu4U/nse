@@ -35,14 +35,14 @@ spring:
       enabled: true
 
 kite:
-  api-key: ${KITE_API_KEY:xcnose6lzs8vuzik}
-  api-secret: ${KITE_API_SECRET:vmzp201xd63bkxj30ltxu7ccg3ko2dk3}
+  api-key: ${KITE_API_KEY:}
+  api-secret: ${KITE_API_SECRET:}
   access-token: ${KITE_ACCESS_TOKEN:}
   base-url: https://api.kite.trade
   ws-url: wss://ws.kite.trade
   reconnect-interval-ms: 5000
   heartbeat-interval-ms: 25000
-  login-url: https://kite.trade/connect/login?api_key=xcnose6lzs8vuzik
+  login-url: https://kite.trade/connect/login?api_key=${KITE_API_KEY}
 
 management:
   endpoints:
