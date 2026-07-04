@@ -71,6 +71,39 @@ def get_strategy_scorecard(days: int = 10, top_n: int = 5, refresh: bool = False
     return engine.strategy_scorecard(days=days, top_n=top_n, refresh=refresh)
 
 
+@router.get("/strategy-scorecard-stop")
+def get_strategy_scorecard_stop(days: int = 10, top_n: int = 5, refresh: bool = False,
+                                db: Session = Depends(get_db)):
+    """
+    Scorecard for the SIBLING strategy: identical Top-N selection as the locked
+    strategy, but exited with a gap-aware -6% disaster stop instead of pure hold-to-close.
+
+    Same reconstruction as /strategy-scorecard; each pick's realized return is re-graded
+    through the stop (original close-to-close preserved as ``raw_cc`` + a ``stopped`` flag),
+    so the two scorecards can be compared side by side. The original card is unaffected.
+    """
+    from app.services.screener import PICK_DISASTER_STOP_PCT
+    engine = StockScreenerEngine(db)
+    return engine.strategy_scorecard(days=days, top_n=top_n, refresh=refresh,
+                                     stop_pct=PICK_DISASTER_STOP_PCT)
+
+
+@router.get("/strategy-scorecard-trail")
+def get_strategy_scorecard_trail(days: int = 30, top_n: int = 5,
+                                 db: Session = Depends(get_db)):
+    """
+    Scorecard for the SIBLING strategy: identical Top-N selection as the locked
+    strategy, but exited with a 2% trailing stop armed after the pick first runs +2%
+    (lock gains once in profit, otherwise hold to close).
+
+    The realized trailing return is intraday-path-dependent, so it is served from the
+    real 5-minute backtest artifact written by backtest_trail.py (with the hold-to-close
+    baseline over the same window for the head-to-head). The original card is unaffected.
+    """
+    engine = StockScreenerEngine(db)
+    return engine.trail_scorecard(days=days, top_n=top_n)
+
+
 @router.get("/intraday-strategy")
 def get_intraday_strategy_today(db: Session = Depends(get_db)):
     """Today's "Strategy 3% · 3:20 PM" Top-5 picks (live price used as the close)."""

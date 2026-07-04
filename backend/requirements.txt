@@ -30,3 +30,5 @@ python-dotenv==1.0.1
 pydantic==2.7.3
 pydantic-settings==2.3.1
 lxml==6.1.1
+kiteconnect==5.2.0
+pyotp==2.10.0

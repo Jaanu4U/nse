@@ -1,0 +1,63 @@
+server:
+  port: 8090
+
+spring:
+  datasource:
+    # Same database as the Python NSE backend
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:nse_stock_db}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASS:postgrespassword}
+    hikari:
+      maximum-pool-size: 12
+      minimum-idle: 2
+      idle-timeout: 30000
+      connection-timeout: 20000
+      pool-name: NseDeltaHikariPool
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 100
+          order_inserts: true
+          order_updates: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    validate-on-migrate: true
+    # Prefix delta tables with delta_ to avoid conflicts with Python backend tables
+    table: delta_schema_history
+  threads:
+    virtual:
+      enabled: true
+
+kite:
+  api-key: ${KITE_API_KEY:xcnose6lzs8vuzik}
+  api-secret: ${KITE_API_SECRET:vmzp201xd63bkxj30ltxu7ccg3ko2dk3}
+  access-token: ${KITE_ACCESS_TOKEN:}
+  base-url: https://api.kite.trade
+  ws-url: wss://ws.kite.trade
+  reconnect-interval-ms: 5000
+  heartbeat-interval-ms: 25000
+  login-url: https://kite.trade/connect/login?api_key=xcnose6lzs8vuzik
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: prometheus,health,info,metrics
+  metrics:
+    tags:
+      application: nse-market-ingest
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+logging:
+  level:
+    com.nse: INFO
+    root: WARN
+    org.springframework.web: WARN

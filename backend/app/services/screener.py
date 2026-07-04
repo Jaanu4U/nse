@@ -11,6 +11,15 @@ STRATEGY_SCORECARD_JSON = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "models", "strategy_scorecard_30d.json")
 
+# Pre-computed trailing-stop scorecard artifact written by backtest_trail.py. Holds the
+# real 5-min-path results for the OOS-validated trail-2% / arm-+2% exit (plus the
+# hold-to-close baseline for the head-to-head). Unlike the disaster stop, the trailing
+# outcome cannot be recomputed from daily bars (it depends on the intraday path order),
+# so its numbers come from this dedicated intraday artifact.
+STRATEGY_SCORECARD_TRAIL_JSON = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "models", "strategy_scorecard_trail_30d.json")
+
 # Liquidity / quality guards for Top Picks: high-probability ML scores are only meaningful
 # on stocks that are actually tradeable AND on established, quality companies. Penny /
 # circuit-locked / near-zero-volume small-caps gap up on a morning pick then fade into the
@@ -39,6 +48,34 @@ PICK_EXCLUDE_SUPERTREND_DOWN = True
 # tested. Only the two LIVE-available features are used (atr from indicators,
 # range_pct from the latest bar) so live and backtest selection stay identical.
 PICK_VOL_BLEND_WEIGHT = 0.50     # weight on volatility percentile vs P(+3%) percentile
+
+# Optional EXIT overlay for the "+ disaster stop" sibling strategy. The SELECTION is
+# identical to the locked Top-5 (P(+3%) x volatility); only the exit differs: hold to
+# close UNLESS the pick craters past -STOP intraday, in which case exit at the stop
+# (gap-aware: a worse open fills at the open). Exit-timing walk-forward (backtest_exit.py,
+# 30d & 60d) found this loose -6% level is the ONLY exit that beat plain hold-to-close on
+# BOTH windows while leaving win-rate and the +2% hit-rate untouched (pure tail insurance;
+# tighter -3/-4% stops were worse). Kept SEPARATE from the original card so that one is
+# never affected.
+PICK_DISASTER_STOP_PCT = 0.06
+
+
+def apply_disaster_stop(entry, next_open, next_low, raw_cc_pct, stop_pct=PICK_DISASTER_STOP_PCT):
+    """Gap-aware disaster-stop realized return (in %), given the close-to-close ``raw_cc_pct``.
+
+    * a next-open already below the stop -> filled at the open (gap-through)
+    * otherwise an intraday low at/under the stop -> filled at exactly -stop_pct
+    * else the stop never triggers -> the unchanged close-to-close return
+    Returns ``raw_cc_pct`` unchanged when inputs are insufficient.
+    """
+    if entry is None or entry <= 0 or raw_cc_pct is None:
+        return raw_cc_pct
+    stop_price = entry * (1 - stop_pct)
+    if next_open is not None and next_open <= stop_price:
+        return (next_open - entry) / entry * 100.0
+    if next_low is not None and next_low <= stop_price:
+        return -stop_pct * 100.0
+    return raw_cc_pct
 
 
 def pick_trend_multiplier(
@@ -579,6 +616,12 @@ class StockScreenerEngine:
                         entry = float(c.get("price") or 0)
                         c["live_price"] = round(lp, 2)
                         c["live_change_pct"] = round((lp - entry) / entry * 100, 2) if entry else None
+                        # running intraday peak (vs entry) — drives the trailing-stop card's
+                        # armed / trail-level / locked status during the session.
+                        hi = q.get("high")
+                        if hi is not None:
+                            c["live_high"] = round(float(hi), 2)
+                            c["live_high_pct"] = round((float(hi) - entry) / entry * 100, 2) if entry else None
                         live_any = True
             except Exception:
                 live_any = False
@@ -601,9 +644,86 @@ class StockScreenerEngine:
             "plus3_top": plus3_top,
         }
 
-    def _scorecard_from_artifact(self, days: int, top_n: int) -> Optional[Dict[str, Any]]:
+    def trail_scorecard(self, days: int = 30, top_n: int = 5) -> Dict[str, Any]:
+        """Serve the trailing-stop (trail-2% / arm-+2%) scorecard artifact written by
+        backtest_trail.py from real 5-minute intraday paths, sliced to the last ``days``
+        sessions, with the hold-to-close baseline recomputed over the same window for the
+        head-to-head. Returns an empty shell if the artifact is missing.
+
+        The realized trailing return is path-dependent (it needs the intraday order of the
+        high vs the low), so — unlike the disaster-stop sibling — it cannot be reconstructed
+        live from daily bars; this card therefore reports the OOS backtest numbers, while
+        the hero card shows today's picks with their live trailing levels.
+        """
+        empty = {"top_n": top_n, "source": "backtest", "rule": "trail2_arm2",
+                 "generated_at": None, "days": [], "overall": None, "baseline_overall": None,
+                 "exit320_overall": None, "stop_overall": None}
+        if not os.path.exists(STRATEGY_SCORECARD_TRAIL_JSON):
+            return empty
+        try:
+            with open(STRATEGY_SCORECARD_TRAIL_JSON) as f:
+                art = json.load(f)
+        except Exception:
+            return empty
+        if art.get("top_n") != top_n:
+            return empty
+
+        sliced = art.get("days", [])[:days]
+
+        def _agg(key):
+            tot = green = hit2 = hit3 = 0
+            cc_sum = 0.0
+            daily = []
+            for d in sliced:
+                vals = [p.get(key) for p in d.get("picks", []) if p.get(key) is not None]
+                if not vals:
+                    continue
+                tot += len(vals)
+                green += sum(1 for v in vals if v > 0.0)
+                hit2 += sum(1 for v in vals if v >= 2.0)
+                hit3 += sum(1 for v in vals if v >= 3.0)
+                cc_sum += sum(vals)
+                daily.append(sum(vals) / len(vals) / 100.0)
+            if not tot:
+                return None
+            cum = 1.0
+            for m in daily:
+                cum *= (1 + m)
+            return {
+                "scored": tot,
+                "avg_cc": round(cc_sum / tot, 2),
+                "green": green,
+                "win_rate": round(green / tot * 100, 1),
+                "hit2": hit2,
+                "hit2_rate": round(hit2 / tot * 100, 1),
+                "hit3": hit3,
+                "hit3_rate": round(hit3 / tot * 100, 1),
+                "cum_pct": round((cum - 1) * 100, 2),
+            }
+
+        return {
+            "top_n": top_n,
+            "source": "backtest",
+            "rule": art.get("rule", "trail2_arm2"),
+            "trail_pct": art.get("trail_pct"),
+            "arm_pct": art.get("arm_pct"),
+            "generated_at": art.get("generated_at"),
+            "days": sliced,
+            "overall": _agg("cc"),
+            "baseline_overall": _agg("base_cc"),
+            "exit320_overall": _agg("exit320_cc"),
+            "stop_overall": _agg("stop_cc"),
+        }
+
+    def _scorecard_from_artifact(self, days: int, top_n: int,
+                                 stop_pct: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Serve the pre-computed 30-day backtest scorecard JSON, reshaped to the same
-        percentage format as the live reconstruction. Returns None if no artifact."""
+        percentage format as the live reconstruction. Returns None if no artifact.
+
+        When ``stop_pct`` is set, the realized close-to-close return of each pick is
+        re-graded through the gap-aware disaster stop (the sibling strategy); the original
+        close-to-close value is preserved as ``raw_cc`` and a ``stopped`` flag is added.
+        """
         if not os.path.exists(STRATEGY_SCORECARD_JSON):
             return None
         try:
@@ -628,8 +748,18 @@ class StockScreenerEngine:
             day_tot = day_green = day_hit2 = day_hit3 = 0
             day_cc = []
             for p in d.get("picks", []):
-                cc = p.get("cc")
-                out_picks.append({
+                raw_cc = p.get("cc")
+                cc = raw_cc
+                stopped = False
+                if stop_pct is not None and raw_cc is not None:
+                    eff = apply_disaster_stop(p.get("entry"), p.get("next_open"),
+                                              p.get("next_low"), raw_cc * 100.0, stop_pct) / 100.0
+                    stopped = eff < raw_cc - 1e-9
+                    cc = eff
+                outcome = p.get("outcome", "PENDING")
+                if stop_pct is not None and cc is not None:
+                    outcome = "WIN" if cc > 0.001 else ("LOSS" if cc < -0.001 else "FLAT")
+                pick_out = {
                     "symbol": p["symbol"],
                     "company_name": p.get("company_name", p["symbol"]),
                     "entry": _px(p.get("entry")),
@@ -642,8 +772,12 @@ class StockScreenerEngine:
                     "cc": _pct(cc),
                     "ch": _pct(p.get("ch")),
                     "oh": _pct(p.get("oh")),
-                    "outcome": p.get("outcome", "PENDING"),
-                })
+                    "outcome": outcome,
+                }
+                if stop_pct is not None:
+                    pick_out["raw_cc"] = _pct(raw_cc)
+                    pick_out["stopped"] = stopped
+                out_picks.append(pick_out)
                 if cc is not None:
                     day_tot += 1
                     if cc > 0:
@@ -653,6 +787,7 @@ class StockScreenerEngine:
                     if cc >= 0.03:
                         day_hit3 += 1
                     day_cc.append(cc * 100)
+
             summary = None
             if day_tot:
                 summary = {
@@ -696,7 +831,8 @@ class StockScreenerEngine:
         }
 
     def strategy_scorecard(self, days: int = 10, top_n: int = 5,
-                           refresh: bool = False) -> Dict[str, Any]:
+                           refresh: bool = False,
+                           stop_pct: Optional[float] = None) -> Dict[str, Any]:
         """
         Reconstruct the locked strategy — Top-N by P(+3%), hold to close — for each
         of the last ``days`` prediction dates and report realized results.
@@ -709,12 +845,16 @@ class StockScreenerEngine:
 
         When ``refresh`` is set, the in-flight day (whose holding session is today) is
         graded against the running market (live close) so the panel updates intraday.
+
+        When ``stop_pct`` is set (the sibling "+ disaster stop" strategy), the SAME picks
+        are graded through a gap-aware stop instead of pure hold-to-close; the original
+        close-to-close return is preserved per pick as ``raw_cc`` plus a ``stopped`` flag.
         """
         # Real forward tracking: reconstruct the strategy from the predictions actually
         # stored each day and grade them against realised closes. As live trading days
         # accumulate these become the scorecard; the pre-computed 30-day walk-forward OOS
         # artifact is only used to BACKFILL older context until enough real days exist.
-        artifact = self._scorecard_from_artifact(days, top_n)
+        artifact = self._scorecard_from_artifact(days, top_n, stop_pct=stop_pct)
 
         today_ist = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).date()
 
@@ -826,6 +966,11 @@ class StockScreenerEngine:
                     cc = (nc - p["entry"]) / p["entry"] * 100
                     ch = (nh - p["entry"]) / p["entry"] * 100
                     oh = (nh - no) / no * 100 if no else None
+                    raw_cc = cc
+                    stopped = False
+                    if stop_pct is not None:
+                        cc = apply_disaster_stop(p["entry"], no, nl, raw_cc, stop_pct)
+                        stopped = cc < raw_cc - 1e-9
                     rec.update({
                         "next_open": round(no, 2), "next_high": round(nh, 2),
                         "next_low": round(nl, 2), "next_close": round(nc, 2),
@@ -833,6 +978,9 @@ class StockScreenerEngine:
                         "oh": round(oh, 2) if oh is not None else None,
                         "outcome": "WIN" if cc > 0.1 else ("LOSS" if cc < -0.1 else "FLAT"),
                     })
+                    if stop_pct is not None:
+                        rec["raw_cc"] = round(raw_cc, 2)
+                        rec["stopped"] = stopped
                     day_tot += 1
                     if cc > 0:
                         day_green += 1

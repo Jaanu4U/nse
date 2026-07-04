@@ -17,7 +17,7 @@ def run_daily_sync():
     Complete end-to-end stock sync, analysis, pattern recognition, and predictions.
     """
     logger.info("Starting scheduled daily data sync and analysis job...")
-    start_job("daily_sync", total=9, message="Starting daily market update")
+    start_job("daily_sync", total=10, message="Starting daily market update")
     db = SessionLocal()
     try:
         # 1. Sync Stock Master
@@ -73,7 +73,17 @@ def run_daily_sync():
         active_stocks = stock_repo.get_active_stocks()
         for stock in active_stocks:
             insider_service.sync_insider_trades(stock.symbol)
-        
+
+        # 10. Grade the prior session's 3:20 PM intraday-strategy picks now that
+        # today's OHLC is ingested, so the scorecard shows the just-completed day
+        # immediately instead of waiting for the 01:00 evaluation job.
+        set_progress(current=10, message="Grading 3:20 PM strategy picks")
+        try:
+            from app.services.intraday_strategy import IntradayStrategyService
+            IntradayStrategyService(db).evaluate()
+        except Exception as ie:
+            logger.error(f"Intraday strategy evaluation in daily sync failed: {ie}")
+
         logger.info("Daily sync and analysis job completed successfully.")
         finish_job(message="Daily market update complete")
         

@@ -468,6 +468,51 @@ def main():
               f"   (filled at target {hit_t:.0f}%, win {win:.0f}%)")
     print()
 
+    # ---- SCALE-OUT: sell a FRACTION at the intraday target, hold the rest to close ----
+    #   entry = ~prev close (the hold-to-close strategy). For each pick:
+    #     sold leg  : if close->high (ch) >= T  -> locks +T ; else exits at close (cc)
+    #     held leg  : always exits at close (cc)  [keeps the fat tail]
+    #   pick return = frac*sold_leg + (1-frac)*cc
+    #   This directly answers "I want my +2% on more picks" WITHOUT killing the
+    #   big winners, because only `frac` of each position is capped.
+    print("=" * 64)
+    print("SCALE-OUT — sell FRAC at +T% intraday (close->high), hold rest to close")
+    print("  pick = frac*(+T if next-high>=+T else cc) + (1-frac)*cc ; entry ~prev close")
+    print("  goal: lock the +2% you wanted on most picks, still ride the fat tail")
+    print("=" * 64)
+    print(f"  {'rule':<22}{'avg/pick':>10}{'daily':>9}{'cumul':>10}{'win%':>7}{'hit+2%':>8}")
+
+    def _scaleout_return(rec, frac, T):
+        # rec = (sym,p3,p2,cc,ch,oh,oc,entry,n_open,n_high,n_low,n_close,vol)
+        cc_i, ch_i = rec[3], rec[4]
+        if cc_i is None:
+            return None
+        sold = T if (ch_i is not None and ch_i >= T) else cc_i
+        return frac * sold + (1 - frac) * cc_i
+
+    SCALE_RULES = [(0.5, 0.02), (0.5, 0.03), (0.7, 0.02), (1.0, 0.02)]
+    # baseline row first
+    base_cum2 = np.prod([1 + m for m in daily_means]) - 1
+    print(f"  {'hold-to-close':<22}{np.mean(pcts_all)*100:>+9.3f}%{np.mean(daily_means)*100:>+8.3f}%"
+          f"{base_cum2*100:>+9.2f}%{sum(1 for v in pcts_all if v>0)/len(pcts_all)*100:>6.0f}%"
+          f"{sum(1 for v in pcts_all if v>=0.02)/len(pcts_all)*100:>7.0f}%")
+    for frac, T in SCALE_RULES:
+        d_means, all_rets = [], []
+        for d, ranked, _n2 in per_day_rows:
+            day_rets = [r for r in (_scaleout_return(rec, frac, T) for rec in ranked) if r is not None]
+            if day_rets:
+                d_means.append(np.mean(day_rets))
+                all_rets.extend(day_rets)
+        if not all_rets:
+            continue
+        cum = np.prod([1 + m for m in d_means]) - 1
+        win = sum(1 for v in all_rets if v > 0) / len(all_rets) * 100
+        hit2 = sum(1 for v in all_rets if v >= 0.02) / len(all_rets) * 100
+        label = f"sell {int(frac*100)}% @+{int(T*100)}%"
+        print(f"  {label:<22}{np.mean(all_rets)*100:>+9.3f}%{np.mean(d_means)*100:>+8.3f}%"
+              f"{cum*100:>+9.2f}%{win:>6.0f}%{hit2:>7.0f}%")
+    print()
+
     # ---- gap-aware STOP-LOSS sweep on the HOLD-TO-CLOSE strategy ----
     print("=" * 64)
     print("STOP-LOSS SWEEP — hold-to-close + protective stop (GAP-AWARE fills)")

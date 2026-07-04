@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     
     # Gemini AI settings
     GEMINI_API_KEY: str = ""
+    # Kite (Zerodha) API credentials for live NSE data
+    KITE_API_KEY: str = ""
+    KITE_API_SECRET: str = ""
+    KITE_ACCESS_TOKEN: str = ""
 
     # Next-day prediction model backend.
     # One of: "ensemble" (XGBoost + LightGBM averaged, default), "xgb", "lgbm", "lstm".

@@ -59,9 +59,31 @@ services:
       - backend
     environment:
       - NEXT_PUBLIC_API_URL=/api/v1
+      - NEXT_PUBLIC_DELTA_API_URL=/delta-api
+      - NEXT_PUBLIC_DELTA_STREAM_URL=/delta-stream
       - NODE_ENV=production
     ports:
       - "3000:3000"
+
+  delta:
+    build: ./backend/java-market-ingest
+    container_name: nse_platform_delta
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=nse_stock_db
+      - DB_USER=postgres
+      - DB_PASS=postgrespassword
+      - KITE_API_KEY=${KITE_API_KEY:-xcnose6lzs8vuzik}
+      - KITE_API_SECRET=${KITE_API_SECRET:-vmzp201xd63bkxj30ltxu7ccg3ko2dk3}
+      - KITE_ACCESS_TOKEN=${KITE_ACCESS_TOKEN:-}
+      - SPRING_FLYWAY_ENABLED=false
+    ports:
+      - "8090:8090"
 
 volumes:
   postgres_data:
