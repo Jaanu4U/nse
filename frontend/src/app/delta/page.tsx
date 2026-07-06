@@ -38,7 +38,11 @@ export default function DeltaPage() {
   const [alerts, setAlerts]     = useState<AlertFired[]>([]);
   const [rules, setRules]       = useState<AlertRule[]>([]);
   const [connected, setConnected] = useState(false);
-  const [tab, setTab]           = useState<'live'|'indicators'|'alerts'>('live');
+  const [tab, setTab]           = useState<'live'|'indicators'|'alerts'|'paper'>('live');
+  const [paperTrades, setPaperTrades] = useState<any[]>([]);
+  const [paperDaily, setPaperDaily]   = useState<any[]>([]);
+  const [paperStats, setPaperStats]   = useState<any>({});
+  const [paperDate, setPaperDate]     = useState('today');
   const [search, setSearch]     = useState('');
   const [sortBy, setSortBy]     = useState<keyof Stock>('predScore');
   const [sortDesc, setSortDesc] = useState(true);
@@ -78,7 +82,15 @@ export default function DeltaPage() {
     connectSSE();
     fetch(`${DELTA_API}/alerts/rules`).then(r => r.ok ? r.json() : []).then(setRules).catch(() => {});
     fetch(`${DELTA_API}/alerts/fired?hours=8`).then(r => r.ok ? r.json() : []).then(setAlerts).catch(() => {});
-    return () => esRef.current?.close();
+    // Load paper trading data
+    const loadPaper = () => {
+      fetch(`${DELTA_API}/paper/trades?date=today`).then(r => r.ok ? r.json() : []).then(setPaperTrades).catch(() => {});
+      fetch(`${DELTA_API}/paper/trades/daily`).then(r => r.ok ? r.json() : []).then(setPaperDaily).catch(() => {});
+      fetch(`${DELTA_API}/paper/trades/stats`).then(r => r.ok ? r.json() : {}).then(setPaperStats).catch(() => {});
+    };
+    loadPaper();
+    const paperInterval = setInterval(loadPaper, 60000); // refresh every minute
+    return () => { esRef.current?.close(); clearInterval(paperInterval); };
   }, [connectSSE]);
 
   const addRule = async () => {
@@ -154,7 +166,7 @@ export default function DeltaPage() {
 
       {/* TABS */}
       <div className="flex items-center gap-2 px-4 pt-3 pb-0">
-        {[['live','⚡ Delta & Price'],['indicators','📈 Indicators'],['alerts','🔔 Alerts']].map(([key, label]) => (
+        {[['live','⚡ Delta & Price'],['indicators','📈 Indicators'],['alerts','🔔 Alerts'],['paper','📋 Paper Trades']].map(([key, label]) => (
           <button key={key} onClick={() => setTab(key as any)}
             className={`text-xs font-semibold px-4 py-1.5 rounded-lg border transition-all ${
               tab === key ? 'bg-violet-950/40 border-violet-600/50 text-violet-300' : 'border-slate-800 text-slate-500 hover:text-slate-300'
@@ -355,7 +367,138 @@ export default function DeltaPage() {
         </div>
       )}
 
-      {/* LEGEND */}
+      {/* ---- PAPER TRADING TAB ---- */}
+      {tab === 'paper' && (
+        <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
+
+          {/* Stats Bar */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { label: 'Total Trades', val: paperStats.total_trades ?? 0, cls: 'text-slate-200' },
+              { label: 'Win Rate', val: `${paperStats.win_rate_pct ?? 0}%`, cls: parseFloat(paperStats.win_rate_pct) >= 55 ? 'text-emerald-400' : 'text-amber-400' },
+              { label: 'Total P&L', val: `₹${(paperStats.total_pnl ?? 0).toLocaleString('en-IN', {minimumFractionDigits:2})}`, cls: parseFloat(paperStats.total_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400' },
+              { label: 'Best Trade', val: `₹${paperStats.best_trade ?? 0}`, cls: 'text-emerald-400' },
+              { label: 'Open Now', val: paperStats.live_open ?? 0, cls: 'text-amber-400' },
+            ].map(({ label, val, cls }) => (
+              <div key={label} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
+                <div className="text-3xs text-slate-500 mb-1">{label}</div>
+                <div className={`text-sm font-bold ${cls}`}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Day-wise Summary */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+            <h3 className="text-xs font-bold mb-3 text-violet-300">Day-Wise P&L (Last 30 Days)</h3>
+            {paperDaily.length === 0 ? (
+              <p className="text-3xs text-slate-500 text-center py-4">No paper trades recorded yet. Trades will auto-start during market hours (9:20 AM IST).</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-3xs">
+                  <thead><tr className="text-slate-500">
+                    <th className="text-left p-1.5">Date</th>
+                    <th className="text-right p-1.5">Trades</th>
+                    <th className="text-right p-1.5">Wins</th>
+                    <th className="text-right p-1.5">Losses</th>
+                    <th className="text-right p-1.5">Win%</th>
+                    <th className="text-right p-1.5">Best</th>
+                    <th className="text-right p-1.5">Worst</th>
+                    <th className="text-right p-1.5 font-bold">Day P&L</th>
+                  </tr></thead>
+                  <tbody>
+                    {paperDaily.map((d: any) => (
+                      <tr key={d.trade_date}
+                        className={`border-t border-slate-800/40 hover:bg-slate-800/20 cursor-pointer ${paperDate === d.trade_date ? 'bg-slate-800/40' : ''}`}
+                        onClick={() => {
+                          setPaperDate(d.trade_date);
+                          fetch(`${DELTA_API}/paper/trades?date=${d.trade_date}`).then(r => r.json()).then(setPaperTrades).catch(() => {});
+                        }}>
+                        <td className="p-1.5 text-slate-300">{d.trade_date}</td>
+                        <td className="p-1.5 text-right text-slate-400">{d.closed}/{d.total_trades}</td>
+                        <td className="p-1.5 text-right text-emerald-400">{d.wins}</td>
+                        <td className="p-1.5 text-right text-red-400">{d.losses}</td>
+                        <td className={`p-1.5 text-right font-bold ${parseFloat(d.win_rate_pct) >= 55 ? 'text-emerald-400' : parseFloat(d.win_rate_pct) >= 45 ? 'text-amber-400' : 'text-red-400'}`}>{d.win_rate_pct}%</td>
+                        <td className="p-1.5 text-right text-emerald-400">₹{d.best_trade ?? '—'}</td>
+                        <td className="p-1.5 text-right text-red-400">₹{d.worst_trade ?? '—'}</td>
+                        <td className={`p-1.5 text-right font-bold ${parseFloat(d.total_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>₹{parseFloat(d.total_pnl ?? 0).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Trade Detail for Selected Date */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-bold text-amber-300">Trades — {paperDate === 'today' ? 'Today' : paperDate}
+                <span className="ml-2 text-slate-500 font-normal">({paperTrades.length} trades)</span>
+              </h3>
+              <button onClick={() => {
+                setPaperDate('today');
+                fetch(`${DELTA_API}/paper/trades?date=today`).then(r => r.json()).then(setPaperTrades).catch(() => {});
+              }} className="text-3xs text-violet-400 hover:text-violet-300">← Today</button>
+            </div>
+            {paperTrades.length === 0 ? (
+              <p className="text-3xs text-slate-500 text-center py-4">No trades for this date.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-3xs">
+                  <thead><tr className="text-slate-500">
+                    <th className="text-left p-1.5">Symbol</th>
+                    <th className="text-right p-1.5">Entry</th>
+                    <th className="text-right p-1.5">Entry₹</th>
+                    <th className="text-right p-1.5">Exit₹</th>
+                    <th className="text-right p-1.5">Qty</th>
+                    <th className="text-right p-1.5">P&L</th>
+                    <th className="text-right p-1.5">Score</th>
+                    <th className="text-right p-1.5">H.Prob</th>
+                    <th className="text-right p-1.5">ML%</th>
+                    <th className="text-right p-1.5">ΔStr%</th>
+                    <th className="text-right p-1.5">Status</th>
+                    <th className="text-right p-1.5">Reason</th>
+                  </tr></thead>
+                  <tbody>
+                    {paperTrades.map((t: any) => {
+                      const pnl = parseFloat(t.pnl ?? 0);
+                      return (
+                        <tr key={t.id} className="border-t border-slate-800/40 hover:bg-slate-800/20">
+                          <td className="p-1.5 font-bold text-slate-100">{t.symbol}</td>
+                          <td className="p-1.5 text-right text-slate-400">{t.entry_ist ? new Date(t.entry_ist).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}) : '—'}</td>
+                          <td className="p-1.5 text-right text-slate-300">₹{parseFloat(t.entry_price ?? 0).toFixed(2)}</td>
+                          <td className="p-1.5 text-right text-slate-300">{t.exit_price ? `₹${parseFloat(t.exit_price).toFixed(2)}` : '—'}</td>
+                          <td className="p-1.5 text-right text-slate-500">{t.qty}</td>
+                          <td className={`p-1.5 text-right font-bold ${t.status === 'OPEN' ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {t.status === 'OPEN' ? 'OPEN' : `₹${pnl.toFixed(2)}`}
+                          </td>
+                          <td className="p-1.5 text-right text-slate-400">{t.pred_score}</td>
+                          <td className="p-1.5 text-right text-slate-400">{t.hist_prob}%</td>
+                          <td className="p-1.5 text-right text-slate-400">{t.ml_prob}%</td>
+                          <td className={`p-1.5 text-right ${parseFloat(t.delta_strength) > 5 ? 'text-emerald-400' : 'text-slate-400'}`}>{parseFloat(t.delta_strength ?? 0).toFixed(1)}%</td>
+                          <td className={`p-1.5 text-right text-3xs font-bold px-1 rounded ${t.status === 'OPEN' ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{t.status}</td>
+                          <td className="p-1.5 text-right text-slate-500">{t.exit_reason ?? '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-slate-700">
+                      <td colSpan={5} className="p-1.5 text-right text-slate-500 font-bold text-3xs">Day Total:</td>
+                      <td className={`p-1.5 text-right font-bold text-sm ${paperTrades.reduce((s: number, t: any) => s + parseFloat(t.pnl ?? 0), 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        ₹{paperTrades.reduce((s: number, t: any) => s + parseFloat(t.pnl ?? 0), 0).toFixed(2)}
+                      </td>
+                      <td colSpan={6}></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ---- LEGEND ---- */}
       <div className="px-4 py-2 border-t border-slate-800/60 flex flex-wrap gap-x-4 gap-y-1 text-3xs text-slate-600">
         <span><span className="text-violet-300">Δ</span> = BuyVol−SellVol</span>
         <span><span className="text-violet-300">Cum Δ</span> = running total</span>

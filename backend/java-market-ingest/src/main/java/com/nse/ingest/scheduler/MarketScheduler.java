@@ -9,6 +9,7 @@ import com.nse.ingest.service.EodService;
 import com.nse.ingest.service.HistoricalDataLoader;
 import com.nse.ingest.service.MarketStateRegistry;
 import com.nse.ingest.service.MinuteCandleAggregator;
+import com.nse.ingest.service.PaperTradingEngine;
 import com.nse.ingest.service.RegimeContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +47,7 @@ public class MarketScheduler {
     private final HistoricalDataLoader    histLoader;
     private final MarketStateRegistry     stateRegistry;
     private final JdbcTemplate            jdbc;
+    private final PaperTradingEngine      paperTrading;
 
     /** Singleton regime context — refreshed at startup and 09:00 IST */
     public static final RegimeContext REGIME = new RegimeContext();
@@ -59,7 +61,8 @@ public class MarketScheduler {
                             MinuteCandleAggregator aggregator,
                             HistoricalDataLoader histLoader,
                             MarketStateRegistry stateRegistry,
-                            JdbcTemplate jdbc) {
+                            JdbcTemplate jdbc,
+                            PaperTradingEngine paperTrading) {
         this.ticker        = ticker;
         this.auth          = auth;
         this.props         = props;
@@ -70,6 +73,7 @@ public class MarketScheduler {
         this.histLoader    = histLoader;
         this.stateRegistry = stateRegistry;
         this.jdbc          = jdbc;
+        this.paperTrading  = paperTrading;
     }
 
     /**
@@ -294,10 +298,14 @@ public class MarketScheduler {
         log.info("[SCHEDULER] Subscribed {} instruments ({} DB-active symbols)", tokens.size(), symbols.size());
     }
 
-    /** Every minute during market hours – persist minute candles */
+    /** Every minute during market hours – persist minute candles + run paper trading */
     @Scheduled(cron = "0 * 3-10 * * MON-FRI", zone = "UTC")
     public void flushMinuteCandles() {
         aggregator.flushMinuteCandles();
+        // Paper trading tick — check entries/exits each minute
+        try { paperTrading.tick(); } catch (Exception e) {
+            log.warn("[PAPER] tick error: {}", e.getMessage());
+        }
     }
 
     /** 15:30 IST – freeze / stop ticker */
