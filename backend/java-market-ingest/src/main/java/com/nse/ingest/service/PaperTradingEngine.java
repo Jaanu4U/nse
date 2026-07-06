@@ -41,8 +41,11 @@ public class PaperTradingEngine {
     private static final int    QTY             = 100;
     private static final double MIN_PRED_SCORE  = 65.0;
     private static final double MIN_DELTA_STR   = 2.0;
-    private static final double MIN_HIST_PROB   = 52.0;
-    private static final double MIN_ML_PROB     = 0.52;
+    // Calibrated to actual data distributions (see PREDICTION_FLOW_AUDIT.md C1):
+    // up_prob_overall universe max ≈ 51.9 (mean 46) → 50 = top tail
+    // ml_up_prob universe max ≈ 0.34 (mean 0.22, base rate 0.15) → 0.28 = top tail
+    private static final double MIN_HIST_PROB   = 50.0;
+    private static final double MIN_ML_PROB     = 0.28;
     private static final LocalTime ENTRY_START  = LocalTime.of(9, 20);
     private static final LocalTime ENTRY_END    = LocalTime.of(14, 55);
     private static final LocalTime EOD_EXIT     = LocalTime.of(15, 20);
