@@ -396,7 +396,9 @@ def generate_ml_predictions(model, importance):
         ),
         prev_min AS (
             SELECT DISTINCT ON (d.symbol) d.symbol,
-                (d.close_price - pm.close_price) / pm.close_price * 100 AS prev_1m_move
+                CASE WHEN pm.close_price > 0 THEN
+                    (d.close_price - pm.close_price) / pm.close_price * 100
+                ELSE 0 END AS prev_1m_move
             FROM delta_minute_candle d
             JOIN delta_minute_candle pm ON pm.symbol = d.symbol
                 AND pm.minute_ts = d.minute_ts - INTERVAL '1 minute'
@@ -451,7 +453,7 @@ def generate_ml_predictions(model, importance):
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO delta_ml_predictions
-                   (symbol, ml_up_prob, ml_down_prob, ml_confidence, feature_importance, updated_at)
+                   (symbol, ml_up_prob, ml_down_prob, ml_confidence, feature_importance)
                    VALUES %s
                    ON CONFLICT (symbol) DO UPDATE SET
                      ml_up_prob = EXCLUDED.ml_up_prob,
