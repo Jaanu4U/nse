@@ -49,6 +49,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   frontend:
     build: ./frontend

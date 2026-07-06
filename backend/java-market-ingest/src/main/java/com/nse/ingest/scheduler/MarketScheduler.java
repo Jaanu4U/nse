@@ -83,6 +83,8 @@ public class MarketScheduler {
      */
     public void loadAvgVolumes() {
         // --- Step 1: per-minute same-time-window avg from delta_minute_candle ---
+        // Epoch-gated to 2026-07-07: before that date `volume` was cumulative day
+        // volume (wrong semantics) — see DATA_AUDIT_REPORT.md D2.
         try {
             String sql = """
                 SELECT symbol,
@@ -91,6 +93,7 @@ public class MarketScheduler {
                        AVG(volume)::bigint AS avg_vol
                 FROM delta_minute_candle
                 WHERE trade_date >= CURRENT_DATE - INTERVAL '22 days'
+                  AND trade_date >= DATE '2026-07-07'
                   AND trade_date <  CURRENT_DATE
                 GROUP BY symbol, minute_of_day
                 """;
@@ -148,7 +151,7 @@ public class MarketScheduler {
         // --- Level 2: historical impact coefficients and probabilities ---
         try {
             String sql = """
-                SELECT symbol, up_prob_overall, avg_move_15m, impact_coeff
+                SELECT symbol, up_prob_overall, avg_move_15m, impact_coeff, bucket_stats
                 FROM delta_stock_profiles
                 WHERE impact_coeff IS NOT NULL
                 """;
@@ -158,11 +161,29 @@ public class MarketScheduler {
                 Number upProb   = (Number) row.get("up_prob_overall");
                 Number move15m  = (Number) row.get("avg_move_15m");
                 Number coeff    = (Number) row.get("impact_coeff");
+                String bucketsJson = row.get("bucket_stats") != null ? row.get("bucket_stats").toString() : null;
                 if (sym != null) {
                     com.nse.ingest.service.SymbolState s = stateRegistry.getOrCreate(sym);
                     if (upProb  != null) s.setHistoricalUpProb(upProb.doubleValue());
                     if (move15m != null) s.setAvgMove15m(move15m.doubleValue());
                     if (coeff   != null) s.setImpactCoeff(coeff.doubleValue());
+                    // C4: load per-bucket conditional up_probs
+                    if (bucketsJson != null && !bucketsJson.isBlank()) {
+                        try {
+                            java.util.Map<String, Double> buckets = new java.util.HashMap<>();
+                            com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+                            com.fasterxml.jackson.databind.JsonNode root = om.readTree(bucketsJson);
+                            for (String key : new String[]{"weak","normal","strong","very_strong"}) {
+                                com.fasterxml.jackson.databind.JsonNode node = root.path(key).path("up_prob");
+                                if (!node.isMissingNode() && !node.isNull()) {
+                                    buckets.put(key, node.asDouble());
+                                }
+                            }
+                            if (!buckets.isEmpty()) s.setBucketUpProbs(buckets);
+                        } catch (Exception je) {
+                            log.debug("[PROFILES] bucket_stats parse error for {}: {}", sym, je.getMessage());
+                        }
+                    }
                     loaded++;
                 }
             }
@@ -335,6 +356,22 @@ public class MarketScheduler {
             if (deleted > 0) log.info("[CLEANUP] Purged {} old minute candle rows (>90 days)", deleted);
         } catch (Exception e) {
             log.warn("[CLEANUP] Minute candle purge failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 08:45 IST (03:15 UTC) Mon-Fri — Kite token health check.
+     * Logs a WARN (visible in dashboards/alerts) if the token has expired so the
+     * day doesn't silently degrade with no live data.
+     */
+    @Scheduled(cron = "0 15 3 * * MON-FRI", zone = "UTC")
+    public void kiteTokenHealthCheck() {
+        if (!auth.isAuthenticated()) {
+            log.warn("[KITE-HEALTH] *** Kite access token is MISSING or EXPIRED at 08:45 IST. " +
+                     "Live ticks will not flow today. " +
+                     "Please authenticate via POST /api/kite/access-token before market open (09:15 IST). ***");
+        } else {
+            log.info("[KITE-HEALTH] Kite token present at 08:45 IST — OK");
         }
     }
 }

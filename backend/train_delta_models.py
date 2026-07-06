@@ -56,19 +56,25 @@ def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
+# Data-semantics epoch (see DATA_AUDIT_REPORT.md): before this date the
+# `volume` column was CUMULATIVE day volume and OHLC was day-running; from
+# this date onward volume/OHLC are true per-minute. Never mix the two epochs.
+DATA_EPOCH_START = "2026-07-07"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LEVEL 2 — Historical statistics per stock
 # ─────────────────────────────────────────────────────────────────────────────
 
 LEVEL2_SQL = """
 WITH avg_vols AS (
-    -- 20-day avg volume per symbol per minute-of-day
     SELECT symbol,
            EXTRACT(HOUR FROM minute_ts AT TIME ZONE 'Asia/Kolkata')::int * 60
              + EXTRACT(MINUTE FROM minute_ts AT TIME ZONE 'Asia/Kolkata')::int AS mod,
            AVG(volume) AS avg_vol
     FROM delta_minute_candle
     WHERE trade_date >= CURRENT_DATE - INTERVAL '25 days'
+      AND trade_date >= DATE '{epoch}'
       AND trade_date <  CURRENT_DATE
       AND volume > 0
     GROUP BY symbol, mod
@@ -81,6 +87,8 @@ base AS (
         d.volume,
         av.avg_vol,
         CASE WHEN av.avg_vol > 0 THEN d.volume::float / av.avg_vol ELSE 1 END AS vol_ratio,
+        -- C3 FIX: signed delta_strength (not unsigned vol_ratio)
+        CASE WHEN av.avg_vol > 0 THEN d.delta::float / av.avg_vol * 100 ELSE 0 END AS delta_strength,
         EXTRACT(HOUR FROM d.minute_ts AT TIME ZONE 'Asia/Kolkata')::int AS ist_hour,
         n15.close_price AS price_15m,
         CASE WHEN d.close_price > 0 THEN
@@ -93,6 +101,7 @@ base AS (
     JOIN delta_minute_candle n15 ON n15.symbol = d.symbol
         AND n15.minute_ts = d.minute_ts + INTERVAL '15 minutes'
     WHERE d.trade_date >= CURRENT_DATE - INTERVAL '{days} days'
+      AND d.trade_date >= DATE '{epoch}'
       AND d.trade_date <  CURRENT_DATE
       AND d.volume > 0
       AND d.close_price > 0
@@ -105,14 +114,16 @@ SELECT
     ROUND(AVG(CASE WHEN move_15m > 0 THEN 1.0 ELSE 0.0 END) * 100, 2) AS up_prob_overall,
     ROUND(AVG(move_15m), 4) AS avg_move_15m,
     -- High volume (> 2x avg)
-    ROUND(AVG(CASE WHEN vol_ratio > 2 AND move_15m > 0 THEN 1.0
-                   WHEN vol_ratio > 2 THEN 0.0 ELSE NULL END) * 100, 2) AS up_prob_high_vol,
-    ROUND(AVG(CASE WHEN vol_ratio > 2 THEN move_15m ELSE NULL END), 4) AS avg_move_high_vol,
-    SUM(CASE WHEN vol_ratio > 2 THEN 1 ELSE 0 END) AS samples_high_vol,
-    -- Impact coefficient (move% per unit vol_ratio above 1)
+    ROUND(AVG(CASE WHEN vol_ratio >= 2 AND move_15m > 0 THEN 1.0
+                   WHEN vol_ratio >= 2 THEN 0.0 ELSE NULL END) * 100, 2) AS up_prob_high_vol,
+    ROUND(AVG(CASE WHEN vol_ratio >= 2 THEN move_15m ELSE NULL END), 4) AS avg_move_high_vol,
+    SUM(CASE WHEN vol_ratio >= 2 THEN 1 ELSE 0 END) AS samples_high_vol,
+    -- C3 FIX: impact_coeff = REGR_SLOPE(move_15m, delta_strength) — signed vs signed
+    -- Only rows with meaningful delta signal (|delta_strength| >= 0.5%)
     ROUND(
         COALESCE(
-            REGR_SLOPE(move_15m, vol_ratio)
+            REGR_SLOPE(move_15m, delta_strength)
+              FILTER (WHERE ABS(delta_strength) >= 0.5)
         , 0)::numeric, 5
     ) AS impact_coeff,
     -- Morning (9:15-11:30) vs afternoon (11:30-15:30)
@@ -120,23 +131,23 @@ SELECT
                    WHEN ist_hour < 11 THEN 0.0 ELSE NULL END) * 100, 2) AS up_prob_morning,
     ROUND(AVG(CASE WHEN ist_hour >= 11 AND move_15m > 0 THEN 1.0
                    WHEN ist_hour >= 11 THEN 0.0 ELSE NULL END) * 100, 2) AS up_prob_afternoon,
-    -- Volume bucket stats as arrays [weak, normal, strong, very_strong, extreme]
+    -- M6 FIX: half-open bucket ranges to avoid double-counting at boundaries
     jsonb_build_object(
         'weak',       jsonb_build_object(
-            'up_prob', ROUND(AVG(CASE WHEN vol_ratio < 1 AND move_15m > 0 THEN 1.0 WHEN vol_ratio < 1 THEN 0.0 ELSE NULL END) * 100, 1),
-            'samples', SUM(CASE WHEN vol_ratio < 1 THEN 1 ELSE 0 END)),
+            'up_prob', ROUND(AVG(CASE WHEN delta_strength > -2 AND delta_strength < 2 AND move_15m > 0 THEN 1.0 WHEN delta_strength > -2 AND delta_strength < 2 THEN 0.0 ELSE NULL END) * 100, 1),
+            'samples', SUM(CASE WHEN delta_strength > -2 AND delta_strength < 2 THEN 1 ELSE 0 END)),
         'normal',     jsonb_build_object(
-            'up_prob', ROUND(AVG(CASE WHEN vol_ratio BETWEEN 1 AND 2 AND move_15m > 0 THEN 1.0 WHEN vol_ratio BETWEEN 1 AND 2 THEN 0.0 ELSE NULL END) * 100, 1),
-            'avg_move', ROUND(AVG(CASE WHEN vol_ratio BETWEEN 1 AND 2 THEN move_15m ELSE NULL END), 3),
-            'samples', SUM(CASE WHEN vol_ratio BETWEEN 1 AND 2 THEN 1 ELSE 0 END)),
+            'up_prob', ROUND(AVG(CASE WHEN delta_strength >= 2 AND delta_strength < 5 AND move_15m > 0 THEN 1.0 WHEN delta_strength >= 2 AND delta_strength < 5 THEN 0.0 ELSE NULL END) * 100, 1),
+            'avg_move', ROUND(AVG(CASE WHEN delta_strength >= 2 AND delta_strength < 5 THEN move_15m ELSE NULL END), 3),
+            'samples', SUM(CASE WHEN delta_strength >= 2 AND delta_strength < 5 THEN 1 ELSE 0 END)),
         'strong',     jsonb_build_object(
-            'up_prob', ROUND(AVG(CASE WHEN vol_ratio BETWEEN 2 AND 3 AND move_15m > 0 THEN 1.0 WHEN vol_ratio BETWEEN 2 AND 3 THEN 0.0 ELSE NULL END) * 100, 1),
-            'avg_move', ROUND(AVG(CASE WHEN vol_ratio BETWEEN 2 AND 3 THEN move_15m ELSE NULL END), 3),
-            'samples', SUM(CASE WHEN vol_ratio BETWEEN 2 AND 3 THEN 1 ELSE 0 END)),
+            'up_prob', ROUND(AVG(CASE WHEN delta_strength >= 5 AND delta_strength < 10 AND move_15m > 0 THEN 1.0 WHEN delta_strength >= 5 AND delta_strength < 10 THEN 0.0 ELSE NULL END) * 100, 1),
+            'avg_move', ROUND(AVG(CASE WHEN delta_strength >= 5 AND delta_strength < 10 THEN move_15m ELSE NULL END), 3),
+            'samples', SUM(CASE WHEN delta_strength >= 5 AND delta_strength < 10 THEN 1 ELSE 0 END)),
         'very_strong', jsonb_build_object(
-            'up_prob', ROUND(AVG(CASE WHEN vol_ratio > 3 AND move_15m > 0 THEN 1.0 WHEN vol_ratio > 3 THEN 0.0 ELSE NULL END) * 100, 1),
-            'avg_move', ROUND(AVG(CASE WHEN vol_ratio > 3 THEN move_15m ELSE NULL END), 3),
-            'samples', SUM(CASE WHEN vol_ratio > 3 THEN 1 ELSE 0 END))
+            'up_prob', ROUND(AVG(CASE WHEN delta_strength >= 10 AND move_15m > 0 THEN 1.0 WHEN delta_strength >= 10 THEN 0.0 ELSE NULL END) * 100, 1),
+            'avg_move', ROUND(AVG(CASE WHEN delta_strength >= 10 THEN move_15m ELSE NULL END), 3),
+            'samples', SUM(CASE WHEN delta_strength >= 10 THEN 1 ELSE 0 END))
     ) AS bucket_stats
 FROM base
 GROUP BY symbol
@@ -145,10 +156,10 @@ HAVING COUNT(*) >= 100
 
 
 def build_level2(days=60):
-    log.info("Building Level 2 historical profiles (last %d days)...", days)
+    log.info("Building Level 2 historical profiles (last %d days, epoch >= %s)...", days, DATA_EPOCH_START)
     conn = get_conn()
     try:
-        sql = LEVEL2_SQL.replace("{days}", str(days))
+        sql = LEVEL2_SQL.replace("{days}", str(days)).replace("{epoch}", DATA_EPOCH_START)
         df = pd.read_sql(sql, conn)
         log.info("Computed Level 2 for %d symbols", len(df))
 
@@ -175,15 +186,15 @@ def build_level2(days=60):
                 [
                     (
                         r.symbol, int(r.samples) if r.samples else 0,
-                        float(r.up_prob_overall) if r.up_prob_overall else None,
-                        float(r.avg_move_15m) if r.avg_move_15m else None,
-                        float(r.up_prob_high_vol) if r.up_prob_high_vol else None,
-                        float(r.avg_move_high_vol) if r.avg_move_high_vol else None,
+                        float(r.up_prob_overall) if r.up_prob_overall is not None else None,
+                        float(r.avg_move_15m) if r.avg_move_15m is not None else None,
+                        float(r.up_prob_high_vol) if r.up_prob_high_vol is not None else None,
+                        float(r.avg_move_high_vol) if r.avg_move_high_vol is not None else None,
                         int(r.samples_high_vol) if r.samples_high_vol else 0,
-                        float(r.impact_coeff) if r.impact_coeff else None,
+                        float(r.impact_coeff) if r.impact_coeff is not None else None,  # M7 FIX
                         json.dumps(r.bucket_stats) if r.bucket_stats else None,
-                        float(r.up_prob_morning) if r.up_prob_morning else None,
-                        float(r.up_prob_afternoon) if r.up_prob_afternoon else None,
+                        float(r.up_prob_morning) if r.up_prob_morning is not None else None,
+                        float(r.up_prob_afternoon) if r.up_prob_afternoon is not None else None,
                     )
                     for r in df.itertuples()
                 ],
@@ -208,6 +219,7 @@ WITH avg_vols AS (
            AVG(volume) AS avg_vol
     FROM delta_minute_candle
     WHERE trade_date >= CURRENT_DATE - INTERVAL '{days} days'
+      AND trade_date >= DATE '{epoch}'
       AND trade_date <  CURRENT_DATE
       AND volume > 0
     GROUP BY symbol, mod
@@ -243,6 +255,15 @@ base AS (
         END AS lower_wick_ratio,
         -- Volume features
         CASE WHEN av.avg_vol > 0 THEN d.volume::float / av.avg_vol ELSE 1 END AS vol_ratio,
+        -- C5 FIX: add core delta order-flow features (previously missing)
+        CASE WHEN d.volume > 0 THEN d.delta::float / d.volume * 100 ELSE 0 END AS delta_pct,
+        CASE WHEN av.avg_vol > 0 THEN d.delta::float / av.avg_vol * 100 ELSE 0 END AS delta_strength,
+        -- Cumulative delta over last 5 minutes (rolling pressure)
+        COALESCE(SUM(d.delta) OVER (
+            PARTITION BY d.symbol, d.trade_date
+            ORDER BY d.minute_ts
+            ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+        ), 0)::float / NULLIF(av.avg_vol, 0) * 100 AS cum_delta_5m,
         -- Momentum (prev minute price change)
         CASE WHEN pm.prev_close > 0 THEN (d.close_price - pm.prev_close) / pm.prev_close * 100 ELSE 0 END AS prev_1m_move,
         -- Target: price move in next 15 minutes
@@ -259,6 +280,7 @@ base AS (
     JOIN delta_minute_candle n15 ON n15.symbol = d.symbol
         AND n15.minute_ts = d.minute_ts + INTERVAL '15 minutes'
     WHERE d.trade_date >= CURRENT_DATE - INTERVAL '{days} days'
+      AND d.trade_date >= DATE '{epoch}'
       AND d.trade_date <  CURRENT_DATE
       AND d.volume > 0
       AND d.close_price > 0
@@ -274,6 +296,8 @@ FEATURE_COLS = [
     'price_vs_open', 'candle_body_pct',
     'upper_wick_ratio', 'lower_wick_ratio',
     'vol_ratio', 'prev_1m_move',
+    # C5 FIX: delta order-flow features (core signal — was missing entirely)
+    'delta_pct', 'delta_strength', 'cum_delta_5m',
 ]
 
 TARGET_UP   = 0.3   # +0.3% in 15 min = bullish
@@ -290,10 +314,10 @@ def build_level3(days=60):
         log.error("xgboost/sklearn not available. Install: pip install xgboost scikit-learn")
         return
 
-    log.info("Loading feature data for Level 3 (last %d days)...", days)
+    log.info("Loading feature data for Level 3 (last %d days, epoch >= %s)...", days, DATA_EPOCH_START)
     conn = get_conn()
     try:
-        sql = FEATURES_SQL.replace("{days}", str(days))
+        sql = FEATURES_SQL.replace("{days}", str(days)).replace("{epoch}", DATA_EPOCH_START)
         df = pd.read_sql(sql, conn)
     finally:
         conn.close()
@@ -308,26 +332,36 @@ def build_level3(days=60):
     # Binary target: price up at least +TARGET_UP%
     y_up = (df['move_15m'] > TARGET_UP).astype(int)
 
-    # Time-based train/test split (last 10% of dates = test)
+    # Time-based 3-way split: train (0-75%), calibration (75-85%), test (85-100%)
+    # M3 FIX: calibrate on a held-out calibration set, evaluate on a separate test set
     dates = sorted(df['trade_date'].unique())
-    split_idx = int(len(dates) * 0.85)
-    test_dates = set(dates[split_idx:])
-    train_mask = ~df['trade_date'].isin(test_dates)
+    cal_split_idx  = int(len(dates) * 0.75)
+    test_split_idx = int(len(dates) * 0.85)
+    cal_dates  = set(dates[cal_split_idx:test_split_idx])
+    test_dates = set(dates[test_split_idx:])
+    train_mask = ~df['trade_date'].isin(cal_dates | test_dates)
+    cal_mask   =  df['trade_date'].isin(cal_dates)
     test_mask  =  df['trade_date'].isin(test_dates)
 
-    X_train, X_test = X[train_mask], X[test_mask]
-    y_train, y_test = y_up[train_mask], y_up[test_mask]
+    X_train, X_cal, X_test = X[train_mask], X[cal_mask], X[test_mask]
+    y_train, y_cal, y_test = y_up[train_mask], y_up[cal_mask], y_up[test_mask]
 
-    log.info("Train: %d rows | Test: %d rows | Positive rate: %.1f%%",
-             len(X_train), len(X_test), y_up.mean() * 100)
+    log.info("Train: %d rows | Cal: %d rows | Test: %d rows | Positive rate: %.1f%%",
+             len(X_train), len(X_cal), len(X_test), y_up.mean() * 100)
 
     # Train XGBoost
+    # M4 FIX: handle class imbalance (14.9% positive rate → scale_pos_weight ≈ 5.7)
+    pos_count = int(y_train.sum())
+    neg_count = int(len(y_train) - pos_count)
+    spw = round(neg_count / max(pos_count, 1), 2)
+    log.info("Class balance: %d pos / %d neg → scale_pos_weight=%.2f", pos_count, neg_count, spw)
     model = XGBClassifier(
         n_estimators=300,
         max_depth=4,
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
+        scale_pos_weight=spw,  # M4 FIX
         use_label_encoder=False,
         eval_metric='logloss',
         n_jobs=-1,
@@ -340,14 +374,16 @@ def build_level3(days=60):
               eval_set=[(X_test, y_test)],
               verbose=False)
 
-    # Calibrate probabilities
+    # Calibrate probabilities on held-out calibration set (M3 FIX: not the test set)
     calibrated = CalibratedClassifierCV(model, method='isotonic', cv='prefit')
-    calibrated.fit(X_test, y_test)
+    calibrated.fit(X_cal, y_cal)
 
     # Evaluate
     y_prob = calibrated.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_prob)
-    log.info("Test AUC: %.4f | Positive rate: %.1f%%", auc, y_test.mean() * 100)
+    base_rate = float(y_train.mean())
+    log.info("Test AUC: %.4f | Positive rate: %.1f%% | Base rate: %.1f%%",
+             auc, y_test.mean() * 100, base_rate * 100)
 
     # Feature importance
     importance = dict(zip(FEATURE_COLS, model.feature_importances_.tolist()))
@@ -359,7 +395,8 @@ def build_level3(days=60):
     model_path = MODEL_DIR / "delta_xgb_model.pkl"
     with open(model_path, 'wb') as f:
         pickle.dump({'model': calibrated, 'features': FEATURE_COLS,
-                     'auc': auc, 'trained_at': datetime.now().isoformat(),
+                     'auc': auc, 'base_rate': base_rate,
+                     'trained_at': datetime.now().isoformat(),
                      'importance': importance_sorted}, f)
     log.info("Model saved to %s", model_path)
 
@@ -382,6 +419,7 @@ def generate_ml_predictions(model, importance):
                    AVG(volume) AS avg_vol
             FROM delta_minute_candle
             WHERE trade_date >= CURRENT_DATE - INTERVAL '22 days'
+              AND trade_date >= DATE '{epoch}'
             GROUP BY symbol, mod
         ),
         latest AS (
@@ -422,11 +460,19 @@ def generate_ml_predictions(model, importance):
             CASE WHEN l.high_price > l.low_price THEN
                 (LEAST(l.open_price, l.close_price) - l.low_price) / (l.high_price - l.low_price) ELSE 0 END AS lower_wick_ratio,
             l.vol_ratio,
-            COALESCE(pm.prev_1m_move, 0) AS prev_1m_move
+            COALESCE(pm.prev_1m_move, 0) AS prev_1m_move,
+            -- C5: delta features for live scoring
+            CASE WHEN l.volume > 0 THEN l.delta::float / l.volume * 100 ELSE 0 END AS delta_pct,
+            CASE WHEN av.avg_vol > 0 THEN l.delta::float / av.avg_vol * 100 ELSE 0 END AS delta_strength,
+            0.0 AS cum_delta_5m
         FROM latest l
         LEFT JOIN prev_min pm ON pm.symbol = l.symbol
         LEFT JOIN day_open do_ ON do_.symbol = l.symbol
+        LEFT JOIN avg_vols av ON av.symbol = l.symbol
+            AND av.mod = EXTRACT(HOUR FROM l.minute_ts AT TIME ZONE 'Asia/Kolkata')::int * 60
+                        + EXTRACT(MINUTE FROM l.minute_ts AT TIME ZONE 'Asia/Kolkata')::int
         """
+        sql = sql.replace("{epoch}", DATA_EPOCH_START)
         df = pd.read_sql(sql, conn)
         log.info("Scoring %d symbols with ML model", len(df))
 
@@ -469,17 +515,36 @@ def generate_ml_predictions(model, importance):
         conn.close()
 
 
+def score_only():
+    """Load the saved weekly model and regenerate predictions without retraining.
+    Used by the 09:00 IST daily rescore job (C6 fix)."""
+    model_path = MODEL_DIR / "delta_xgb_model.pkl"
+    if not model_path.exists():
+        log.warning("No saved model at %s — run a full --level 3 training first.", model_path)
+        return
+    with open(model_path, 'rb') as f:
+        bundle = pickle.load(f)
+    log.info("Loaded model trained at %s (AUC %.4f)",
+             bundle.get('trained_at', '?'), bundle.get('auc', 0))
+    generate_ml_predictions(bundle['model'], bundle.get('importance', {}))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--level", default="all", choices=["2", "3", "all"])
     parser.add_argument("--days",  type=int, default=60)
+    parser.add_argument("--score-only", action="store_true",
+                        help="Skip training; load saved model and regenerate predictions")
     args = parser.parse_args()
 
     start = datetime.now()
-    if args.level in ("2", "all"):
-        build_level2(args.days)
-    if args.level in ("3", "all"):
-        build_level3(args.days)
+    if args.score_only:
+        score_only()
+    else:
+        if args.level in ("2", "all"):
+            build_level2(args.days)
+        if args.level in ("3", "all"):
+            build_level3(args.days)
 
     log.info("Done in %.1fs", (datetime.now() - start).total_seconds())
 

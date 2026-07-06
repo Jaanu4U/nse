@@ -43,7 +43,7 @@ public class TickProcessorService {
         try {
             SymbolState state = registry.getOrCreate(tick.symbol());
             state.acceptTick(
-                tick.ltp(), tick.lastTradedQty(),
+                tick.ltp(), tick.lastTradedQty(), tick.volume(),
                 tick.bestBidPrice(), tick.bestBidQty(),
                 tick.bestAskPrice(), tick.bestAskQty()
             );

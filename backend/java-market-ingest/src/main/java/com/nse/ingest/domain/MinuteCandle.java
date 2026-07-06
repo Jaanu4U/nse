@@ -19,6 +19,7 @@ public class MinuteCandle {
     @Column(name = "low_price",   precision = 14, scale = 4) private BigDecimal lowPrice;
     @Column(name = "close_price", precision = 14, scale = 4) private BigDecimal closePrice;
     private Long volume;
+    @Column(name = "day_volume")  private Long dayVolume;
     @Column(name = "buy_volume")  private Long buyVolume;
     @Column(name = "sell_volume") private Long sellVolume;
     private Long delta;
@@ -40,6 +41,8 @@ public class MinuteCandle {
     public void setClosePrice(BigDecimal v) { this.closePrice = v; }
     public Long getVolume() { return volume; }
     public void setVolume(Long v) { this.volume = v; }
+    public Long getDayVolume() { return dayVolume; }
+    public void setDayVolume(Long v) { this.dayVolume = v; }
     public Long getBuyVolume() { return buyVolume; }
     public void setBuyVolume(Long v) { this.buyVolume = v; }
     public Long getSellVolume() { return sellVolume; }

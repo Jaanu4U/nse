@@ -6,7 +6,8 @@ import { useStockStore, API_BASE, Stock } from '../store/useStockStore';
 import StockChart from '../components/StockChart';
 import { 
   TrendingUp, TrendingDown, Search, Shield, RefreshCw, 
-  Filter, AlertTriangle, Cpu, Globe, Activity, Rocket, BarChart3, ArrowRight 
+  Filter, AlertTriangle, Cpu, Globe, Activity, Rocket, BarChart3, ArrowRight,
+  XCircle, ChevronDown, ChevronUp, AlertCircle,
 } from 'lucide-react';
 
 // Custom lightweight Markdown renderer to support AI Analyst tab cleanly without dependencies
@@ -113,10 +114,28 @@ export default function Home() {
   const [jobStatus, setJobStatus] = useState<any>(null);
   const [showJobDone, setShowJobDone] = useState(false);
 
+  // System error/warning panel
+  const [sysErrors, setSysErrors] = useState<any[]>([]);
+  const [errPanelOpen, setErrPanelOpen] = useState(true);
+  const [errDismissed, setErrDismissed] = useState(false);
+
   // Fetch stocks list on mount
   useEffect(() => {
     fetchStocks();
   }, [fetchStocks]);
+
+  // Poll system errors/warnings every 60s — shows inline on dashboard
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/admin/errors/recent?limit=30`);
+        if (r.ok) setSysErrors(await r.json());
+      } catch { /* silent — non-critical */ }
+    };
+    load();
+    const id = setInterval(load, 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Poll background job status so the UI can show a live progress bar
   useEffect(() => {
@@ -443,6 +462,68 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* SYSTEM ERROR / WARNING PANEL — only when errors exist and not dismissed */}
+      {sysErrors.length > 0 && !errDismissed && (() => {
+        const errCount  = sysErrors.filter(e => e.level === 'ERROR').length;
+        const warnCount = sysErrors.filter(e => e.level === 'WARNING').length;
+        const hasCrit   = errCount > 0;
+        const fmt = (iso: string) => {
+          const d = new Date(iso);
+          return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) +
+                 ' ' + d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+        };
+        return (
+          <div className={`rounded-2xl border backdrop-blur-lg ${hasCrit ? 'bg-red-950/25 border-red-700/50' : 'bg-amber-950/20 border-amber-700/40'}`}>
+            {/* Header row */}
+            <div className="flex items-center gap-3 px-5 py-3">
+              {hasCrit
+                ? <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                : <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />}
+              <span className={`text-xs font-semibold flex-1 ${hasCrit ? 'text-red-300' : 'text-amber-300'}`}>
+                System Alerts —&nbsp;
+                {errCount > 0 && <span className="text-red-400">{errCount} error{errCount !== 1 ? 's' : ''}</span>}
+                {errCount > 0 && warnCount > 0 && <span className="text-slate-500"> · </span>}
+                {warnCount > 0 && <span className="text-amber-400">{warnCount} warning{warnCount !== 1 ? 's' : ''}</span>}
+              </span>
+              <div className="flex items-center gap-2">
+                <Link href="/admin" className={`text-2xs px-2.5 py-1 rounded-lg border transition-colors ${hasCrit ? 'border-red-700/50 text-red-400 hover:bg-red-900/30' : 'border-amber-700/40 text-amber-400 hover:bg-amber-900/20'}`}>
+                  View all →
+                </Link>
+                <button onClick={() => setErrPanelOpen(o => !o)}
+                  className="text-slate-500 hover:text-slate-300 transition-colors p-1">
+                  {errPanelOpen ? <ChevronUp size={15}/> : <ChevronDown size={15}/>}
+                </button>
+                <button onClick={() => setErrDismissed(true)}
+                  className="text-slate-600 hover:text-slate-400 transition-colors p-1 text-xs leading-none">✕</button>
+              </div>
+            </div>
+
+            {/* Expandable rows */}
+            {errPanelOpen && (
+              <div className="border-t border-slate-800/60 divide-y divide-slate-800/40 max-h-48 overflow-y-auto">
+                {sysErrors.slice(0, 10).map(e => (
+                  <div key={e.id} className="flex items-start gap-3 px-5 py-2.5 hover:bg-slate-800/20 transition-colors">
+                    <span className={`mt-0.5 flex-shrink-0 text-3xs font-bold px-1.5 py-0.5 rounded border ${
+                      e.level === 'ERROR'
+                        ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                        : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                    }`}>{e.level === 'ERROR' ? 'ERR' : 'WRN'}</span>
+                    <span className="text-3xs text-slate-500 whitespace-nowrap mt-0.5 flex-shrink-0 w-28">{fmt(e.captured_at)}</span>
+                    <span className="text-3xs text-slate-400 font-mono flex-shrink-0 w-20 truncate mt-0.5">{e.service ?? e.logger?.split('.').pop() ?? '—'}</span>
+                    <span className="text-3xs text-slate-300 leading-relaxed line-clamp-2">{e.message}</span>
+                  </div>
+                ))}
+                {sysErrors.length > 10 && (
+                  <div className="px-5 py-2 text-3xs text-slate-500 text-center">
+                    +{sysErrors.length - 10} more — <Link href="/admin" className="text-emerald-500 hover:underline">open admin →</Link>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* DASHBOARD CONTENT GRID */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

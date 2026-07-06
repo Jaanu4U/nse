@@ -43,48 +43,44 @@ public class MinuteCandleAggregator {
         List<MinuteCandle> candles = new ArrayList<>(registry.symbolCount());
 
         for (SymbolState state : registry.all()) {
-            if (state.getTotalVolume() == 0) continue;
+            // Capture per-minute buy/sell/delta BEFORE resetting the rate window
+            long minuteBuy   = state.getDeltaEngine().getBuyVolume();
+            long minuteSell  = state.getDeltaEngine().getSellVolume();
+            long minuteDelta = state.getDeltaEngine().getDelta();
+
+            // D1/D2 FIX: true per-minute OHLC + per-minute volume
+            SymbolState.MinuteBar bar = state.snapshotAndResetMinuteBar();
+            long barDelta = state.getDeltaEngine().snapshotAndResetRate();
+
+            // D4 FIX: skip minutes with no trades (previously wrote a stale row
+            // for every symbol whose DAY volume was > 0 — 88% dead rows)
+            if (bar.volume() == 0) continue;
 
             MinuteCandle c = new MinuteCandle();
             c.setSymbol(state.getSymbol());
             c.setTradeDate(today);
             c.setMinuteTs(now.withSecond(0).withNano(0));
-            c.setOpenPrice(bd(state.getOpen()));
-            c.setHighPrice(bd(state.getHigh()));
-            c.setLowPrice(bd(state.getLow()));
-            c.setClosePrice(bd(state.getLtp()));
-            c.setVolume(state.getTotalVolume());
-            c.setBuyVolume(state.getDeltaEngine().getBuyVolume());
-            c.setSellVolume(state.getDeltaEngine().getSellVolume());
-            c.setDelta(state.getDeltaEngine().getDelta());
+            c.setOpenPrice(bd(bar.open()));
+            c.setHighPrice(bd(bar.high()));
+            c.setLowPrice(bd(bar.low()));
+            c.setClosePrice(bd(bar.close()));
+            c.setVolume(bar.volume());                 // per-minute volume
+            c.setDayVolume(state.getTotalVolume());    // cumulative day volume (separate column)
+            c.setBuyVolume(minuteBuy);
+            c.setSellVolume(minuteSell);
+            c.setDelta(minuteDelta);
             candles.add(c);
 
-            // Update rolling windows
-            long barDelta = state.getDeltaEngine().snapshotAndResetRate();
-            state.window1m.push(now.toEpochSecond(java.time.ZoneOffset.UTC),
-                state.getOpen(), state.getHigh(), state.getLow(), state.getLtp(),
-                state.getTotalVolume(),
-                state.getDeltaEngine().getBuyVolume(),
-                state.getDeltaEngine().getSellVolume(),
-                barDelta);
-            state.window5m.push(now.toEpochSecond(java.time.ZoneOffset.UTC),
-                state.getOpen(), state.getHigh(), state.getLow(), state.getLtp(),
-                state.getTotalVolume(),
-                state.getDeltaEngine().getBuyVolume(),
-                state.getDeltaEngine().getSellVolume(),
-                barDelta);
-            state.window15m.push(now.toEpochSecond(java.time.ZoneOffset.UTC),
-                state.getOpen(), state.getHigh(), state.getLow(), state.getLtp(),
-                state.getTotalVolume(),
-                state.getDeltaEngine().getBuyVolume(),
-                state.getDeltaEngine().getSellVolume(),
-                barDelta);
-            state.windowDay.push(now.toEpochSecond(java.time.ZoneOffset.UTC),
-                state.getOpen(), state.getHigh(), state.getLow(), state.getLtp(),
-                state.getTotalVolume(),
-                state.getDeltaEngine().getBuyVolume(),
-                state.getDeltaEngine().getSellVolume(),
-                barDelta);
+            // Update rolling windows with the completed minute bar
+            long epochTs = now.toEpochSecond(java.time.ZoneOffset.UTC);
+            state.window1m.push(epochTs, bar.open(), bar.high(), bar.low(), bar.close(),
+                bar.volume(), minuteBuy, minuteSell, barDelta);
+            state.window5m.push(epochTs, bar.open(), bar.high(), bar.low(), bar.close(),
+                bar.volume(), minuteBuy, minuteSell, barDelta);
+            state.window15m.push(epochTs, bar.open(), bar.high(), bar.low(), bar.close(),
+                bar.volume(), minuteBuy, minuteSell, barDelta);
+            state.windowDay.push(epochTs, bar.open(), bar.high(), bar.low(), bar.close(),
+                bar.volume(), minuteBuy, minuteSell, barDelta);
         }
 
         if (!candles.isEmpty()) {

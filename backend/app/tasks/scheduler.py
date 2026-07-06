@@ -9,6 +9,7 @@ from app.services.corporate_actions import CorporateActionsService
 from app.utils.job_progress import start_job, set_progress, finish_job, fail_job
 import logging
 import datetime
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -127,50 +128,6 @@ def start_scheduler():
         id='hourly_news_job'
     )
 
-    # Snapshot the Top-5 high-probability picks every trading morning (09:10 IST,
-    # before market open) so the day's recommendations are archived for scoring.
-    def snapshot_picks_job():
-        logger.info("Snapshotting daily Top-5 picks...")
-        db = SessionLocal()
-        try:
-            from app.services.daily_picks import DailyPicksService
-            DailyPicksService(db).snapshot_today()
-        except Exception as e:
-            logger.error(f"Error snapshotting daily picks: {e}")
-        finally:
-            db.close()
-
-    scheduler.add_job(
-        snapshot_picks_job,
-        'cron',
-        day_of_week='mon-fri',
-        hour=9,
-        minute=10,
-        id='snapshot_picks_job'
-    )
-
-    # After market close (15:45 IST) score how many of today's picks worked out
-    # by fetching the realised intraday OHLC and flagging WIN/LOSS.
-    def evaluate_picks_job():
-        logger.info("Evaluating daily Top-5 picks after close...")
-        db = SessionLocal()
-        try:
-            from app.services.daily_picks import DailyPicksService
-            DailyPicksService(db).evaluate_picks()
-        except Exception as e:
-            logger.error(f"Error evaluating daily picks: {e}")
-        finally:
-            db.close()
-
-    scheduler.add_job(
-        evaluate_picks_job,
-        'cron',
-        day_of_week='mon-fri',
-        hour=15,
-        minute=45,
-        id='evaluate_picks_job'
-    )
-
     # "Strategy 3% · 3:20 PM": ten minutes before the NSE close, treat the live price as
     # today's close, re-run the prediction pipeline on the liquid universe and snapshot
     # the Top-5 by P(+3%) so they are actionable before the 15:30 close.
@@ -192,27 +149,6 @@ def start_scheduler():
         hour=15,
         minute=20,
         id='intraday_strategy_job'
-    )
-
-    # After 1 AM IST (next session's close already settled by the prior evening sync),
-    # grade any still-pending 3:20 PM picks against the realised next-day HIGH.
-    def evaluate_intraday_strategy_job():
-        logger.info("Evaluating 3:20 PM strategy picks against realised next-day high...")
-        db = SessionLocal()
-        try:
-            from app.services.intraday_strategy import IntradayStrategyService
-            IntradayStrategyService(db).evaluate()
-        except Exception as e:
-            logger.error(f"Error evaluating intraday strategy: {e}")
-        finally:
-            db.close()
-
-    scheduler.add_job(
-        evaluate_intraday_strategy_job,
-        'cron',
-        hour=1,
-        minute=0,
-        id='evaluate_intraday_strategy_job'
     )
 
     # 18:15 IST Mon-Fri — update regime context (VIX, expiry, gap day, Nifty trend)
@@ -263,5 +199,132 @@ def start_scheduler():
         id='retrain_delta_models_job'
     )
 
+    # C6 FIX: Re-score all symbols with the current ML model every trading morning at
+    # 09:00 IST using yesterday's complete candle data — predictions are no longer stale
+    # from the prior session.
+    def rescore_ml_predictions_job():
+        logger.info("[ML-RESCORE] Regenerating daily ML predictions at 09:00...")
+        import subprocess, sys
+        try:
+            result = subprocess.run(
+                [sys.executable, "/workspace/train_delta_models.py", "--score-only"],
+                capture_output=True, text=True, timeout=300  # 5 min max for scoring-only pass
+            )
+            if result.returncode == 0:
+                logger.info("[ML-RESCORE] ML predictions refreshed successfully.")
+            else:
+                logger.error(f"[ML-RESCORE] Rescore failed:\n{result.stderr[-1000:]}")
+        except subprocess.TimeoutExpired:
+            logger.error("[ML-RESCORE] Rescore timed out after 5 minutes.")
+        except Exception as e:
+            logger.error(f"[ML-RESCORE] Rescore error: {e}")
+
+    scheduler.add_job(
+        rescore_ml_predictions_job,
+        'cron',
+        day_of_week='mon-fri',
+        hour=9,
+        minute=0,
+        id='rescore_ml_predictions_job'
+    )
+
+    # EOD accuracy tracking job — 16:00 IST Mon-Fri.
+    # Computes directional hit-rate, profit factor and calibration for delta_prediction_history.
+    # Closes the feedback loop from the audit roadmap.
+    def eod_accuracy_job():
+        logger.info("[ACCURACY] Computing EOD prediction accuracy metrics...")
+        import psycopg2
+        import os
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("DB_HOST", "db"),
+                port=int(os.getenv("DB_PORT", 5432)),
+                dbname=os.getenv("DB_NAME", "nse_stock_db"),
+                user=os.getenv("DB_USER", "postgres"),
+                password=os.getenv("DB_PASS", "postgrespassword"),
+            )
+            today = datetime.date.today()
+            with conn.cursor() as cur:
+                # Resolve today's delta_prediction_history rows against realised close prices.
+                # A prediction is a "HIT" when:
+                #   BULLISH signal → next candle close > entry price (positive move)
+                #   BEARISH signal → next candle close < entry price (negative move)
+                cur.execute("""
+                    INSERT INTO delta_prediction_accuracy
+                      (trade_date, total_predictions, hits, hit_rate,
+                       avg_predicted_score, avg_realised_move,
+                       profit_factor, computed_at)
+                    WITH resolved AS (
+                        SELECT
+                            ph.symbol,
+                            ph.signal,
+                            ph.prediction_score,
+                            ph.created_at,
+                            -- 15-min forward return
+                            CASE WHEN mc_now.close_price > 0
+                                 THEN (mc_fwd.close_price - mc_now.close_price) / mc_now.close_price * 100
+                                 ELSE NULL END AS realised_move
+                        FROM delta_prediction_history ph
+                        JOIN delta_minute_candle mc_now
+                          ON mc_now.symbol = ph.symbol
+                         AND mc_now.minute_ts = date_trunc('minute', ph.created_at)
+                        JOIN delta_minute_candle mc_fwd
+                          ON mc_fwd.symbol = ph.symbol
+                         AND mc_fwd.minute_ts = date_trunc('minute', ph.created_at) + INTERVAL '15 minutes'
+                        WHERE ph.created_at::date = %s
+                          AND ph.signal IN ('BULLISH', 'BEARISH')
+                    ),
+                    scored AS (
+                        SELECT *,
+                            CASE WHEN signal = 'BULLISH' AND realised_move > 0 THEN 1
+                                 WHEN signal = 'BEARISH' AND realised_move < 0 THEN 1
+                                 ELSE 0 END AS is_hit
+                        FROM resolved WHERE realised_move IS NOT NULL
+                    )
+                    SELECT
+                        %s,
+                        COUNT(*),
+                        SUM(is_hit),
+                        ROUND(AVG(is_hit) * 100, 2),
+                        ROUND(AVG(prediction_score), 2),
+                        ROUND(AVG(realised_move), 4),
+                        ROUND(
+                            SUM(CASE WHEN is_hit = 1 THEN ABS(realised_move) ELSE 0 END) /
+                            NULLIF(SUM(CASE WHEN is_hit = 0 THEN ABS(realised_move) ELSE 0 END), 0)
+                        , 3),
+                        NOW()
+                    FROM scored
+                    ON CONFLICT (trade_date) DO UPDATE SET
+                        total_predictions = EXCLUDED.total_predictions,
+                        hits              = EXCLUDED.hits,
+                        hit_rate          = EXCLUDED.hit_rate,
+                        avg_predicted_score = EXCLUDED.avg_predicted_score,
+                        avg_realised_move   = EXCLUDED.avg_realised_move,
+                        profit_factor     = EXCLUDED.profit_factor,
+                        computed_at       = EXCLUDED.computed_at
+                """, (today, today))
+                conn.commit()
+                # Log summary
+                cur.execute("SELECT total_predictions, hits, hit_rate, profit_factor FROM delta_prediction_accuracy WHERE trade_date = %s", (today,))
+                row = cur.fetchone()
+                if row:
+                    logger.info("[ACCURACY] %s — %d predictions, %d hits (%.1f%%), profit factor=%.2f",
+                                today, row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0)
+        except Exception as e:
+            logger.error(f"[ACCURACY] EOD accuracy job failed: {e}")
+        finally:
+            try: conn.close()
+            except: pass
+
+    scheduler.add_job(
+        eod_accuracy_job,
+        'cron',
+        day_of_week='mon-fri',
+        hour=16,
+        minute=0,
+        id='eod_accuracy_job'
+    )
+
     scheduler.start()
     logger.info("APScheduler initialized and started successfully.")
+    return scheduler

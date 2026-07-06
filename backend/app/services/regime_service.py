@@ -163,7 +163,12 @@ def update_regime_context(trade_date: date = None):
             sorted_vix = sorted(vix_history[:-1])  # exclude today
             rank = sum(1 for v in sorted_vix if v <= india_vix)
             vix_percentile = round(rank / len(sorted_vix) * 100, 2)
-            if vix_percentile >= 90:
+            # Minor fix: keep NORMAL until we have at least 10 days of history
+            # to avoid percentile instability with sparse early data.
+            if len(sorted_vix) < 10:
+                vix_level = "NORMAL"
+                log.info("VIX history < 10 days (%d) — clamping level to NORMAL", len(sorted_vix))
+            elif vix_percentile >= 90:
                 vix_level = "EXTREME"
             elif vix_percentile >= 75:
                 vix_level = "HIGH"

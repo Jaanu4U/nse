@@ -99,27 +99,23 @@ public class PredictionEngine {
         double confidence = Math.abs(rawScore);
 
         // Blend L2 historical prob + L3 ML prob into final score
-        double histProb = state.getHistoricalUpProb(); // 0-100 range from DB
-        double mlProb   = state.getMlUpProb();          // 0-1 range from DB
+        // C2 FIX: normalize against actual distribution baselines, not 0.5
+        //   histProb universe mean ≈ 46.0 (market drift); std-dev proxy = 8.0
+        //   mlProb base rate ≈ 0.149 (14.9% of 15-min windows show +0.3% move)
+        // C4 FIX: use conditional bucket up_prob (given live deltaStrength) instead of unconditional overall
+        double histProb = state.getBucketUpProb(deltaStrength); // bucket-conditional; falls back to overall
+        double mlProb   = state.getMlUpProb();                   // 0-1 range from DB
         if (histProb > 0 || mlProb > 0) {
-            // Normalize histProb to 0-1, then blend:
-            // blendedProb = 0.4 * histProb/100 + 0.6 * mlProb  (L3 weighted more)
-            double histNorm = histProb > 0 ? (histProb / 100.0) : 0.5;
-            double mlNorm   = mlProb   > 0 ? mlProb              : 0.5;
-            double blended  = (histProb > 0 && mlProb > 0)
-                ? 0.40 * histNorm + 0.60 * mlNorm
-                : (histProb > 0 ? histNorm : mlNorm);
-            // Map blended prob [0,1] → additional signal [-1,+1] and mix 30% into rawScore
-            double probSignal = clamp((blended - 0.5) * 4, -1, 1);
-            rawScore = rawScore * 0.70 + probSignal * 0.30;
-            // Recalculate score/probabilities after blending
-            score = (rawScore + 1.0) / 2.0 * 100.0;
-            score = Math.max(0, Math.min(100, score));
-            double expB2 = Math.exp(rawScore);
-            double expS2 = Math.exp(-rawScore);
-            bullish = expB2 / (expB2 + expS2);
-            bearish = expS2 / (expB2 + expS2);
-            confidence = Math.abs(rawScore);
+            double histSignal = histProb > 0
+                ? clamp((histProb - 46.0) / 8.0, -1, 1)        // +1 when histProb=54%, -1 when 38%
+                : 0;
+            double mlSignal = mlProb > 0
+                ? clamp((mlProb - 0.149) / 0.149, -1.5, 1.5) / 1.5  // +1 when 2× base rate (0.30)
+                : 0;
+            double blended = (histProb > 0 && mlProb > 0)
+                ? 0.40 * histSignal + 0.60 * mlSignal
+                : (histProb > 0 ? histSignal : mlSignal);
+            rawScore = rawScore * 0.70 + clamp(blended, -1, 1) * 0.30;
         }
 
         // Expected Move % = deltaStrength * impactCoeff * confirmationMultiplier
@@ -148,18 +144,39 @@ public class PredictionEngine {
             expectedMove *= regimeMult;
             expectedTarget = state.getLtp() > 0 ? state.getLtp() * (1 + expectedMove / 100.0) : 0.0;
         }
-        // On hostile regime (high VIX + expiry/gap), also reduce blended score confidence
+        // On hostile regime (high VIX + expiry/gap), reduce blended score confidence
         if (regime.isHostileRegime()) {
             rawScore *= 0.80;
-            score = (rawScore + 1.0) / 2.0 * 100.0;
-            score = Math.max(0, Math.min(100, score));
         }
 
-        // Absorption detection: positive delta but price flat or falling
+        // M5 FIX: single exit point — derive ALL output fields from final rawScore
+        score      = Math.max(0, Math.min(100, (rawScore + 1.0) / 2.0 * 100.0));
+        double expBf = Math.exp(rawScore);
+        double expSf = Math.exp(-rawScore);
+        bullish    = expBf / (expBf + expSf);
+        bearish    = expSf / (expBf + expSf);
+        confidence = Math.abs(rawScore);
+
+        // M2 FIX: Absorption detection — buying pressure (cumDelta rising) but price flat/down.
+        // Use 15-min rolling window so the check is stable after each minute flush.
+        // Criteria: net buying over last 15 min (totalDelta > 0) AND
+        //           price change over that window is <= 0 (price not responding to buying).
         boolean absorption = false;
-        if (state.getDeltaEngine().getDelta() > 0 && state.getVwap() > 0) {
-            double pricePct = state.getVwap() > 0 ? (state.getLtp() - state.getVwap()) / state.getVwap() * 100 : 0;
-            if (pricePct <= -0.1) absorption = true; // positive delta but price below VWAP
+        if (state.window15m.getFilled() >= 3) {
+            long win15Delta = state.window15m.totalDelta();
+            double win15Low  = state.window15m.windowLow();
+            double win15High = state.window15m.windowHigh();
+            // Window open approximation: low when going up (first bar low), but simpler:
+            // if totalDelta is strongly positive and current price is at/below window low + small band
+            if (win15Delta > 0) {
+                // Price flat/down: current ltp is no more than 0.1% above the window low
+                double ltp15 = state.getLtp();
+                if (win15High > 0 && ltp15 > 0) {
+                    double priceRangeRatio = (ltp15 - win15Low) / (win15High - win15Low + 0.001);
+                    // In the lower 30% of the 15-min range despite net buying = absorption
+                    if (priceRangeRatio <= 0.30) absorption = true;
+                }
+            }
         }
         if (absorption) { expectedMove *= 0.5; expectedTarget = state.getLtp() > 0 ? state.getLtp() * (1 + expectedMove / 100.0) : 0.0; }
 
