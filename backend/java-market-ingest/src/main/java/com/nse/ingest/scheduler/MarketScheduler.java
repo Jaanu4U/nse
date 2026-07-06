@@ -132,11 +132,67 @@ public class MarketScheduler {
         }
     }
 
+    /**
+     * Load Level 2 (historical profiles) and Level 3 (ML predictions) from DB into SymbolState.
+     * Called at startup and 09:00 IST.
+     */
+    public void loadProfiles() {
+        // --- Level 2: historical impact coefficients and probabilities ---
+        try {
+            String sql = """
+                SELECT symbol, up_prob_overall, avg_move_15m, impact_coeff
+                FROM delta_stock_profiles
+                WHERE impact_coeff IS NOT NULL
+                """;
+            int loaded = 0;
+            for (java.util.Map<String, Object> row : jdbc.queryForList(sql)) {
+                String sym = (String) row.get("symbol");
+                Number upProb   = (Number) row.get("up_prob_overall");
+                Number move15m  = (Number) row.get("avg_move_15m");
+                Number coeff    = (Number) row.get("impact_coeff");
+                if (sym != null) {
+                    com.nse.ingest.service.SymbolState s = stateRegistry.getOrCreate(sym);
+                    if (upProb  != null) s.setHistoricalUpProb(upProb.doubleValue());
+                    if (move15m != null) s.setAvgMove15m(move15m.doubleValue());
+                    if (coeff   != null) s.setImpactCoeff(coeff.doubleValue());
+                    loaded++;
+                }
+            }
+            log.info("[PROFILES] Loaded Level 2 profiles for {} symbols", loaded);
+        } catch (Exception e) {
+            log.warn("[PROFILES] Level 2 load failed: {}", e.getMessage());
+        }
+        // --- Level 3: ML predictions ---
+        try {
+            String sql = """
+                SELECT symbol, ml_up_prob, ml_confidence
+                FROM delta_ml_predictions
+                WHERE ml_up_prob IS NOT NULL
+                """;
+            int loaded = 0;
+            for (java.util.Map<String, Object> row : jdbc.queryForList(sql)) {
+                String sym  = (String) row.get("symbol");
+                Number prob = (Number) row.get("ml_up_prob");
+                Number conf = (Number) row.get("ml_confidence");
+                if (sym != null) {
+                    com.nse.ingest.service.SymbolState s = stateRegistry.getOrCreate(sym);
+                    if (prob != null) s.setMlUpProb(prob.doubleValue());
+                    if (conf != null) s.setMlConfidence(conf.doubleValue());
+                    loaded++;
+                }
+            }
+            log.info("[PROFILES] Loaded Level 3 ML predictions for {} symbols", loaded);
+        } catch (Exception e) {
+            log.warn("[PROFILES] Level 3 load failed: {}", e.getMessage());
+        }
+    }
+
     /** 09:00 IST – pre-warm indicators from stored history, then connect WebSocket */
     @Scheduled(cron = "0 30 3 * * MON-FRI", zone = "UTC")
     public void connectWebSocket() {
         log.info("[SCHEDULER] 09:00 IST – warming indicators + connecting WebSocket");
         loadAvgVolumes();  // load 20-day avg volume before ticks arrive
+        loadProfiles();    // load L2/L3 profiles
         if (auth.isAuthenticated()) {
             registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
             // Pre-warm IndicatorEngine from yesterday's stored bars so ATR/EMA/MACD
@@ -160,6 +216,7 @@ public class MarketScheduler {
             Thread.ofVirtual().start(() -> {
                 try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
                 loadAvgVolumes();
+                loadProfiles();
                 registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
                 ticker.connect();
                 try { Thread.sleep(3000); } catch (InterruptedException ignored) {}

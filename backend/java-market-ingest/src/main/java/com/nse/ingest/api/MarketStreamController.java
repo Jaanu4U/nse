@@ -174,10 +174,16 @@ public class MarketStreamController {
             m.put("bbLower",        round2(ind.getBbLower()));
             m.put("bbBandwidth",    round2(ind.getBbBandwidth()));
             m.put("superTrendDir",  ind.getSuperTrendDir());
-            m.put("predScore",      round2(pred.predictionScore()));
-            m.put("bullishProb",    round4(pred.bullishProbability()));
-            m.put("signal",         pred.signal());
-            m.put("ts",             LocalDateTime.now().toString());
+            m.put("predScore",         round2(pred.predictionScore()));
+            m.put("bullishProb",         round4(pred.bullishProbability()));
+            m.put("signal",              pred.signal());
+            // Level 2 / 3 enriched fields
+            m.put("historicalUpProb",    round2(state.getHistoricalUpProb()));
+            m.put("mlUpProb",            round4(state.getMlUpProb()));
+            m.put("expectedMove",        round4(state.getExpectedMove()));
+            m.put("expectedTarget",      round2(state.getExpectedTarget()));
+            m.put("absorption",          state.isAbsorption());
+            m.put("ts",                  LocalDateTime.now().toString());
             list.add(m);
         }
         list.sort((a, b) -> Double.compare((double) b.getOrDefault("predScore", 0.0), (double) a.getOrDefault("predScore", 0.0)));

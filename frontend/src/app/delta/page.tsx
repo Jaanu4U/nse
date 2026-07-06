@@ -16,6 +16,9 @@ interface Stock {
   macdLine: number; macdSignal: number; macdHist: number;
   bbUpper: number; bbLower: number; bbBandwidth: number;
   superTrendDir: number; predScore: number; bullishProb: number; signal: string;
+  // Level 2 / 3 enriched
+  historicalUpProb: number; mlUpProb: number;
+  expectedMove: number; expectedTarget: number; absorption: boolean;
   ts: string;
 }
 
@@ -176,8 +179,10 @@ export default function DeltaPage() {
                 {th('Vol×','volumeRatio','w-16')}
                 {th('Delta','delta','w-20')}
                 {th('Cum Δ','cumulativeDelta','w-20')}
-                {th('OBI','obi','w-14')}
-                {th('RSI','rsi','w-14')}
+                {th('H.Prob%','historicalUpProb','w-20')}
+                {th('ML Prob%','mlUpProb','w-20')}
+                {th('Exp.Move%','expectedMove','w-24')}
+                {th('Target','expectedTarget','w-20')}
                 {th('Score','predScore','w-16')}
                 <th className="p-2 text-right text-slate-500 font-semibold w-20">Signal</th>
               </tr>
@@ -209,6 +214,28 @@ export default function DeltaPage() {
                     <td className={`p-2 text-right font-bold ${s.cumulativeDelta >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{s.cumulativeDelta >= 0 ? '+' : ''}{(s.cumulativeDelta/1000).toFixed(1)}K</td>
                     <td className={`p-2 text-right ${s.obi > 0.1 ? 'text-emerald-400' : s.obi < -0.1 ? 'text-red-400' : 'text-slate-500'}`}>{(s.obi*100).toFixed(1)}%</td>
                     <td className={`p-2 text-right ${s.rsi > 65 ? 'text-amber-400' : s.rsi < 35 ? 'text-sky-400' : 'text-slate-400'}`}>{fmt(s.rsi,1)}</td>
+                    {/* Level 2: Historical Up Probability */}
+                    <td className={`p-2 text-right font-bold ${
+                      s.historicalUpProb > 60 ? 'text-emerald-400' : s.historicalUpProb > 50 ? 'text-emerald-600' :
+                      s.historicalUpProb > 0 ? 'text-slate-400' : 'text-slate-600'
+                    }`}>{s.historicalUpProb > 0 ? s.historicalUpProb.toFixed(1)+'%' : '—'}</td>
+                    {/* Level 3: ML Up Probability */}
+                    <td className={`p-2 text-right font-bold ${
+                      s.mlUpProb > 0.6 ? 'text-emerald-400' : s.mlUpProb > 0.5 ? 'text-emerald-600' :
+                      s.mlUpProb > 0 ? 'text-slate-400' : 'text-slate-600'
+                    }`}>{s.mlUpProb > 0 ? (s.mlUpProb*100).toFixed(1)+'%' : '—'}</td>
+                    {/* Expected Move */}
+                    <td className={`p-2 text-right font-bold ${
+                      s.expectedMove > 0.5 ? 'text-emerald-400' : s.expectedMove > 0 ? 'text-emerald-600' :
+                      s.expectedMove < -0.5 ? 'text-red-400' : s.expectedMove < 0 ? 'text-red-600' : 'text-slate-500'
+                    }`}>
+                      {s.expectedMove !== 0 ? (s.expectedMove >= 0 ? '+' : '') + s.expectedMove.toFixed(2)+'%' : '—'}
+                      {s.absorption && <span className="ml-1 text-amber-400 text-xs" title="Absorption: positive delta but price not moving">⚠</span>}
+                    </td>
+                    {/* Expected Target */}
+                    <td className="p-2 text-right text-slate-300 text-xs">
+                      {s.expectedTarget > 0 ? '₹'+s.expectedTarget.toFixed(1) : '—'}
+                    </td>
                     <td className={`p-2 text-right font-extrabold text-sm ${scoreColor(s.predScore)}`}>{fmt(s.predScore,1)}</td>
                     <td className="p-2 text-right">
                       <span className={`text-3xs font-bold px-1.5 py-0.5 rounded ${s.signal === 'BULLISH' ? 'bg-emerald-950/60 text-emerald-400' : s.signal === 'BEARISH' ? 'bg-red-950/60 text-red-400' : 'text-slate-500'}`}>

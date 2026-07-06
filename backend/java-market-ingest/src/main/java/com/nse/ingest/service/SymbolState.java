@@ -63,6 +63,17 @@ public class SymbolState {
     // Per-minute avg volume (key = IST minute-of-day 0-1439) from delta_minute_candle
     private volatile Map<Integer, Long> avgVolumeByMinute = null;
 
+    // --- Level 2 / Level 3 profile (loaded from DB at startup) ---
+    private volatile double historicalUpProb = 0.0;  // from delta_stock_profiles
+    private volatile double mlUpProb         = 0.0;  // from delta_ml_predictions
+    private volatile double mlConfidence     = 0.0;
+    private volatile double impactCoeff      = 0.0;  // Future Move% / DeltaStrength%
+    private volatile double avgMove15m       = 0.0;  // avg 15-min move from L2
+    // Calculated live each score cycle
+    private volatile double expectedMove     = 0.0;  // deltaStrength * impactCoeff * multiplier
+    private volatile double expectedTarget   = 0.0;  // ltp * (1 + expectedMove/100)
+    private volatile boolean absorptionFlag  = false; // +delta but price flat/down
+
     public SymbolState(String symbol) {
         this.symbol = symbol;
     }
@@ -214,6 +225,25 @@ public class SymbolState {
     public String getSymbol()         { return symbol; }
     public DeltaEngine     getDeltaEngine() { return deltaEngine; }
     public IndicatorEngine getIndicators()  { return indicators; }
+
+    // Level 2 / 3 profile accessors
+    public double  getHistoricalUpProb() { return historicalUpProb; }
+    public double  getMlUpProb()         { return mlUpProb; }
+    public double  getMlConfidence()     { return mlConfidence; }
+    public double  getImpactCoeff()      { return impactCoeff; }
+    public double  getAvgMove15m()       { return avgMove15m; }
+    public double  getExpectedMove()     { return expectedMove; }
+    public double  getExpectedTarget()   { return expectedTarget; }
+    public boolean isAbsorption()        { return absorptionFlag; }
+
+    public void setHistoricalUpProb(double v) { this.historicalUpProb = v; }
+    public void setMlUpProb(double v)         { this.mlUpProb = v; }
+    public void setMlConfidence(double v)     { this.mlConfidence = v; }
+    public void setImpactCoeff(double v)      { this.impactCoeff = v; }
+    public void setAvgMove15m(double v)       { this.avgMove15m = v; }
+    public void setExpectedMove(double v)     { this.expectedMove = v; }
+    public void setExpectedTarget(double v)   { this.expectedTarget = v; }
+    public void setAbsorptionFlag(boolean v)  { this.absorptionFlag = v; }
 
     /** Called at 15:35 — clear all intraday state. */
     public void reset() {

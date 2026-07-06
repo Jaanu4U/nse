@@ -97,6 +97,60 @@ public class PredictionEngine {
         // Confidence: higher when score is far from 50
         double confidence = Math.abs(rawScore);
 
+        // Blend L2 historical prob + L3 ML prob into final score
+        double histProb = state.getHistoricalUpProb(); // 0-100 range from DB
+        double mlProb   = state.getMlUpProb();          // 0-1 range from DB
+        if (histProb > 0 || mlProb > 0) {
+            // Normalize histProb to 0-1, then blend:
+            // blendedProb = 0.4 * histProb/100 + 0.6 * mlProb  (L3 weighted more)
+            double histNorm = histProb > 0 ? (histProb / 100.0) : 0.5;
+            double mlNorm   = mlProb   > 0 ? mlProb              : 0.5;
+            double blended  = (histProb > 0 && mlProb > 0)
+                ? 0.40 * histNorm + 0.60 * mlNorm
+                : (histProb > 0 ? histNorm : mlNorm);
+            // Map blended prob [0,1] → additional signal [-1,+1] and mix 30% into rawScore
+            double probSignal = clamp((blended - 0.5) * 4, -1, 1);
+            rawScore = rawScore * 0.70 + probSignal * 0.30;
+            // Recalculate score/probabilities after blending
+            score = (rawScore + 1.0) / 2.0 * 100.0;
+            score = Math.max(0, Math.min(100, score));
+            double expB2 = Math.exp(rawScore);
+            double expS2 = Math.exp(-rawScore);
+            bullish = expB2 / (expB2 + expS2);
+            bearish = expS2 / (expB2 + expS2);
+            confidence = Math.abs(rawScore);
+        }
+
+        // Expected Move % = deltaStrength * impactCoeff * confirmationMultiplier
+        double impactCoeff = state.getImpactCoeff();
+        double expectedMove = 0.0;
+        if (impactCoeff != 0.0) {
+            double deltaStr = state.getDeltaStrength();
+            // Confirmation multiplier: above VWAP & volume spike boost, below VWAP reduces
+            double vwapMult = (state.getLtp() > state.getVwap() && state.getVwap() > 0) ? 1.15 : 0.75;
+            double volMult  = state.getVolumeRatio() > 2.0 ? 1.30 : state.getVolumeRatio() > 1.5 ? 1.15 : 1.0;
+            double confirmMult = vwapMult * volMult;
+            expectedMove = deltaStr * impactCoeff * confirmMult;
+            expectedMove = Math.max(-5.0, Math.min(5.0, expectedMove)); // cap at ±5%
+        } else if (state.getAvgMove15m() != 0.0) {
+            // Fallback: use historical avg move scaled by current volume ratio
+            expectedMove = state.getAvgMove15m() * Math.min(state.getVolumeRatio(), 2.0);
+        }
+        double expectedTarget = state.getLtp() > 0 ? state.getLtp() * (1 + expectedMove / 100.0) : 0.0;
+
+        // Absorption detection: positive delta but price flat or falling
+        boolean absorption = false;
+        if (state.getDeltaEngine().getDelta() > 0 && state.getVwap() > 0) {
+            double pricePct = state.getVwap() > 0 ? (state.getLtp() - state.getVwap()) / state.getVwap() * 100 : 0;
+            if (pricePct <= -0.1) absorption = true; // positive delta but price below VWAP
+        }
+        if (absorption) { expectedMove *= 0.5; expectedTarget = state.getLtp() > 0 ? state.getLtp() * (1 + expectedMove / 100.0) : 0.0; }
+
+        // Store back into state for SSE stream
+        state.setExpectedMove(Math.round(expectedMove * 10000) / 10000.0);
+        state.setExpectedTarget(Math.round(expectedTarget * 100) / 100.0);
+        state.setAbsorptionFlag(absorption);
+
         String signal = rawScore > 0.2 ? "BULLISH" : rawScore < -0.2 ? "BEARISH" : "NEUTRAL";
 
         return new PredictionResultDto(

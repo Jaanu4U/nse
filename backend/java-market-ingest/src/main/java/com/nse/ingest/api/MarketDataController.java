@@ -55,7 +55,10 @@ public class MarketDataController {
             state.getDeltaEngine().getDelta(),
             state.getDeltaEngine().getCumulativeDelta(),
             state.getOrderBookImbalance(), state.getRsi(),
-            pred.predictionScore(), LocalDateTime.now()
+            pred.predictionScore(),
+            state.getHistoricalUpProb(), state.getMlUpProb(),
+            state.getExpectedMove(), state.getExpectedTarget(), state.isAbsorption(),
+            LocalDateTime.now()
         ));
     }
 
@@ -75,7 +78,10 @@ public class MarketDataController {
                 state.getDeltaEngine().getDelta(),
                 state.getDeltaEngine().getCumulativeDelta(),
                 state.getOrderBookImbalance(), state.getRsi(),
-                pred.predictionScore(), LocalDateTime.now()
+                pred.predictionScore(),
+                state.getHistoricalUpProb(), state.getMlUpProb(),
+                state.getExpectedMove(), state.getExpectedTarget(), state.isAbsorption(),
+                LocalDateTime.now()
             ));
         }
         list.sort(Comparator.comparingDouble(SymbolSnapshotDto::predictionScore).reversed());

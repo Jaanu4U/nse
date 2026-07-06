@@ -20,5 +20,11 @@ public record SymbolSnapshotDto(
     double orderBookImbalance,
     double rsi,
     double predictionScore,
+    // Level 2 / 3 enriched fields
+    double historicalUpProb,
+    double mlUpProb,
+    double expectedMove,
+    double expectedTarget,
+    boolean absorption,
     LocalDateTime snapshotAt
 ) {}
