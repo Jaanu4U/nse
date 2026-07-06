@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:16-alpine
@@ -37,6 +35,7 @@ services:
     build: ./backend
     container_name: nse_platform_backend
     restart: always
+    env_file: ./backend/.env
     depends_on:
       db:
         condition: service_healthy
@@ -69,6 +68,7 @@ services:
     build: ./backend/java-market-ingest
     container_name: nse_platform_delta
     restart: always
+    env_file: ./backend/.env
     depends_on:
       db:
         condition: service_healthy
@@ -78,10 +78,8 @@ services:
       - DB_NAME=nse_stock_db
       - DB_USER=postgres
       - DB_PASS=postgrespassword
-      - KITE_API_KEY=${KITE_API_KEY:-}
-      - KITE_API_SECRET=${KITE_API_SECRET:-}
-      - KITE_ACCESS_TOKEN=${KITE_ACCESS_TOKEN:-}
       - SPRING_FLYWAY_ENABLED=false
+      # KITE_API_KEY, KITE_API_SECRET, KITE_ACCESS_TOKEN come from env_file above
     ports:
       - "8090:8090"
 

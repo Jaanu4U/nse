@@ -15,72 +15,71 @@ import org.springframework.stereotype.Component;
 @Component
 public class PredictionEngine {
 
-    // Signal weights (must sum to 1.0)
-    private static final double W_DELTA          = 0.20;
-    private static final double W_CUM_DELTA      = 0.15;
-    private static final double W_VWAP           = 0.12;
-    private static final double W_VOLUME         = 0.08;
-    private static final double W_OBI            = 0.15;  // order-book imbalance
-    private static final double W_RSI            = 0.10;
-    private static final double W_PRICE_POS      = 0.10;  // price vs intraday range
-    private static final double W_VOLUME_SPIKE   = 0.05;
-    private static final double W_DELTA_MOMENTUM = 0.05;
+    // Level-1 signal weights — matches roadmap formula:
+    // 25% Delta Strength + 15% Cum-Delta + 15% VWAP + 15% Volume + 10% OBI + 10% Trend + 10% Momentum
+    private static final double W_DELTA_STRENGTH = 0.25;  // normalized delta (core signal)
+    private static final double W_CUM_DELTA      = 0.15;  // cumulative delta direction
+    private static final double W_VWAP           = 0.15;  // price vs VWAP
+    private static final double W_VOLUME         = 0.15;  // volume expansion
+    private static final double W_OBI            = 0.10;  // order-book imbalance
+    private static final double W_TREND          = 0.10;  // RSI + EMA trend
+    private static final double W_DELTA_MOMENTUM = 0.10;  // delta rate momentum
 
     public PredictionResultDto score(SymbolState state) {
         double rawScore = 0.0;
-
-        // 1. Delta signal: (buyVol - sellVol) / totalVol  → [-1, +1]
         long totalVol = state.getTotalVolume();
-        if (totalVol > 0) {
-            double deltaRatio = (double) state.getDeltaEngine().getDelta() / totalVol;
-            rawScore += W_DELTA * clamp(deltaRatio, -1, 1);
-        }
 
-        // 2. Cumulative delta trend: sign and magnitude
+        // 1. Delta Strength (25%) — normalized delta vs 20-day same-time avg volume
+        //    deltaStrength% = netDelta / avgSameTimeVol20d × 100  → cap at ±20% for scoring
+        double deltaStrength = state.getDeltaStrength();
+        rawScore += W_DELTA_STRENGTH * clamp(deltaStrength / 20.0, -1, 1);
+
+        // 2. Cumulative Delta Direction (15%) — is buying pressure building?
         long cumDelta = state.getDeltaEngine().getCumulativeDelta();
-        double cumDeltaSignal = totalVol > 0 ? clamp((double) cumDelta / totalVol, -1, 1) : 0;
+        double cumDeltaSignal = totalVol > 0 ? clamp((double) cumDelta / (totalVol + 1), -1, 1) : 0;
         rawScore += W_CUM_DELTA * cumDeltaSignal;
 
-        // 3. VWAP deviation: (ltp - vwap) / vwap → buy above vwap
+        // 3. VWAP Position (15%) — institutional bias: above = bullish, below = bearish
+        //    Use tight scale: ±0.5% deviation from VWAP = full signal
         double vwap = state.getVwap();
         double ltp  = state.getLtp();
         if (vwap > 0) {
-            double vwapDev = clamp((ltp - vwap) / vwap * 50, -1, 1);
+            double vwapDev = clamp((ltp - vwap) / vwap * 200, -1, 1);
             rawScore += W_VWAP * vwapDev;
         }
 
-        // 4. Volume spike: volume vs 20-day avg (approximated by today's pace)
-        double volSpike = 0;
-        long avgVol20 = state.getAvgVolume20d();
-        if (avgVol20 > 0) {
-            double pace = (double) totalVol / avgVol20;
-            volSpike = clamp(pace - 1.0, -1, 1);
-        }
-        rawScore += W_VOLUME * volSpike;
-        rawScore += W_VOLUME_SPIKE * volSpike;
+        // 4. Volume Expansion (15%) — confirms participation
+        //    volumeRatio = currentVol / avgVol20d; >1.5x = strong, <0.5x = weak
+        double volRatio = state.getVolumeRatio();
+        double volSignal = clamp((volRatio - 1.0) * 0.8, -1, 1);
+        // Adjust by delta direction (volume spike in direction of delta is more meaningful)
+        if (deltaStrength < 0) volSignal = -Math.abs(volSignal);
+        rawScore += W_VOLUME * volSignal;
 
-        // 5. Order-book imbalance: (bidVol - askVol) / (bidVol + askVol) → [-1,+1]
+        // 5. Order Book Imbalance (10%) — near-term liquidity pressure
         long bidVol = state.getBestBidQty();
         long askVol = state.getBestAskQty();
         double obi = (bidVol + askVol) > 0
-                ? (double)(bidVol - askVol) / (bidVol + askVol)
+                ? clamp((double)(bidVol - askVol) / (bidVol + askVol), -1, 1)
                 : 0;
         rawScore += W_OBI * obi;
 
-        // 6. RSI: centre on 50, scale: rsi>60 bullish, <40 bearish
+        // 6. Trend (10%) — RSI + EMA alignment
+        //    RSI>60 and price>EMA20 = bullish trend confirmation
         double rsi = state.getRsi();
-        double rsiSignal = clamp((rsi - 50.0) / 50.0, -1, 1);
-        rawScore += W_RSI * rsiSignal;
+        double rsiSignal = clamp((rsi - 50.0) / 30.0, -1, 1);  // ±30 RSI points = full signal
+        IndicatorEngine ind = state.getIndicators();
+        double emaTrend = (vwap > 0 && ind.getEma20() > 0)
+                ? clamp((ltp - ind.getEma20()) / (ind.getEma20() + 0.001) * 100, -1, 1)
+                : 0;
+        double trendSignal = (rsiSignal + emaTrend) / 2.0;
+        // SuperTrend confirmation: +1 dir = bullish, -1 = bearish
+        if (ind.getSuperTrendDir() != 0) trendSignal = (trendSignal + ind.getSuperTrendDir()) / 2.0;
+        rawScore += W_TREND * trendSignal;
 
-        // 7. Price position in intraday range
-        double high = state.getIntradayHigh();
-        double low  = state.getIntradayLow();
-        double pricePos = (high > low) ? clamp((ltp - low) / (high - low) * 2 - 1, -1, 1) : 0;
-        rawScore += W_PRICE_POS * pricePos;
-
-        // 8. Delta momentum: delta rate vs previous rate
+        // 7. Delta Momentum (10%) — is delta accelerating? (rising = stronger signal)
         long deltaRate = state.getDeltaEngine().getDeltaRate();
-        double dmSignal = totalVol > 0 ? clamp((double) deltaRate / (totalVol + 1) * 10, -1, 1) : 0;
+        double dmSignal = totalVol > 0 ? clamp((double) deltaRate / (totalVol + 1) * 20, -1, 1) : 0;
         rawScore += W_DELTA_MOMENTUM * dmSignal;
 
         // Map rawScore [-1,+1] → predictionScore [0,100]

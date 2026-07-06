@@ -91,8 +91,13 @@ def kite_login() -> str:
     """
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Origin": "https://kite.zerodha.com",
         "Referer": f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3",
+        "x-kite-version": "3",
+        "x-kite-userid": USER_ID,
     })
 
     # ── Step 1: password login ──────────────────────────────────────────────
@@ -111,42 +116,40 @@ def kite_login() -> str:
     # ── Step 2: TOTP ────────────────────────────────────────────────────────
     totp_code = generate_totp()
     log.info("Step 2: TOTP submit (%s)", totp_code)
-    resp = session.post(TWOFA_URL, data={
+    session.post(TWOFA_URL, data={
         "user_id": USER_ID,
         "request_id": request_id,
         "twofa_value": totp_code,
         "twofa_type": "totp",
         "skip_session": "",
     }, allow_redirects=False)
+    log.info("Step 2: TOTP accepted")
 
-    # After 2FA Kite redirects to our callback with request_token in the URL
-    redirect_url = resp.headers.get("Location", "")
-    log.info("2FA redirect: %s", redirect_url[:120])
-
-    # If the redirect is to our callback, follow it
-    if not redirect_url:
-        # Some versions return JSON with the redirect
-        try:
-            body2 = resp.json()
-            redirect_url = body2.get("data", {}).get("redirect_url", "")
-        except Exception:
-            pass
-
-    # Extract request_token from redirect URL
-    match = re.search(r"request_token=([A-Za-z0-9]+)", redirect_url)
-    if not match:
-        # Try following the redirect manually
-        resp2 = session.get(redirect_url, allow_redirects=True)
-        match = re.search(r"request_token=([A-Za-z0-9]+)", resp2.url)
-    if not match:
-        raise RuntimeError(f"Could not extract request_token from: {redirect_url}")
-    request_token = match.group(1)
+    # ── Step 3: GET connect/login → follow redirects manually, stop before callback
+    log.info("Step 3: fetching connect/login to obtain request_token")
+    connect_url = f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3"
+    request_token = None
+    current_url = connect_url
+    for _ in range(10):
+        resp2 = session.get(current_url, allow_redirects=False)
+        location = resp2.headers.get("Location", "")
+        log.info("Redirect %s → %s", resp2.status_code, location[:100])
+        match = re.search(r"request_token=([A-Za-z0-9]+)", location)
+        if match:
+            request_token = match.group(1)
+            break
+        if resp2.status_code in (301, 302, 303, 307, 308) and location:
+            current_url = location
+        else:
+            break
+    if not request_token:
+        raise RuntimeError(f"Could not extract request_token from redirect chain")
     log.info("Got request_token: %s...", request_token[:8])
 
     # ── Step 3: exchange request_token → access_token ───────────────────────
     import hashlib
     checksum = hashlib.sha256(f"{API_KEY}{request_token}{API_SECRET}".encode()).hexdigest()
-    resp = session.post("https://api.kite.trade/session/token", data={
+    resp = requests.post("https://api.kite.trade/session/token", data={
         "api_key": API_KEY,
         "request_token": request_token,
         "checksum": checksum,

@@ -7,13 +7,18 @@ import com.nse.ingest.kite.KiteTickerClient;
 import com.nse.ingest.kite.WatchlistProvider;
 import com.nse.ingest.service.EodService;
 import com.nse.ingest.service.HistoricalDataLoader;
+import com.nse.ingest.service.MarketStateRegistry;
 import com.nse.ingest.service.MinuteCandleAggregator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationStartedEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Drives the full market day lifecycle via cron expressions (IST = UTC+5:30).
@@ -38,6 +43,8 @@ public class MarketScheduler {
     private final EodService              eodService;
     private final MinuteCandleAggregator  aggregator;
     private final HistoricalDataLoader    histLoader;
+    private final MarketStateRegistry     stateRegistry;
+    private final JdbcTemplate            jdbc;
 
     public MarketScheduler(KiteTickerClient ticker,
                             KiteAuthService auth,
@@ -46,21 +53,90 @@ public class MarketScheduler {
                             WatchlistProvider watchlist,
                             EodService eodService,
                             MinuteCandleAggregator aggregator,
-                            HistoricalDataLoader histLoader) {
-        this.ticker     = ticker;
-        this.auth       = auth;
-        this.props      = props;
-        this.registry   = registry;
-        this.watchlist  = watchlist;
-        this.eodService = eodService;
-        this.aggregator = aggregator;
-        this.histLoader = histLoader;
+                            HistoricalDataLoader histLoader,
+                            MarketStateRegistry stateRegistry,
+                            JdbcTemplate jdbc) {
+        this.ticker        = ticker;
+        this.auth          = auth;
+        this.props         = props;
+        this.registry      = registry;
+        this.watchlist     = watchlist;
+        this.eodService    = eodService;
+        this.aggregator    = aggregator;
+        this.histLoader    = histLoader;
+        this.stateRegistry = stateRegistry;
+        this.jdbc          = jdbc;
+    }
+
+    /**
+     * Load per-minute avg volume from delta_minute_candle (last 20 trading days).
+     * Also falls back to daily avg from prices_daily for symbols missing from candle table.
+     * Called at startup and 09:00 IST so same-time-window deltaStrength is accurate immediately.
+     */
+    public void loadAvgVolumes() {
+        // --- Step 1: per-minute same-time-window avg from delta_minute_candle ---
+        try {
+            String sql = """
+                SELECT symbol,
+                       EXTRACT(HOUR FROM minute_ts AT TIME ZONE 'Asia/Kolkata')::int * 60
+                         + EXTRACT(MINUTE FROM minute_ts AT TIME ZONE 'Asia/Kolkata')::int AS minute_of_day,
+                       AVG(volume)::bigint AS avg_vol
+                FROM delta_minute_candle
+                WHERE trade_date >= CURRENT_DATE - INTERVAL '22 days'
+                  AND trade_date <  CURRENT_DATE
+                GROUP BY symbol, minute_of_day
+                """;
+            java.util.Map<String, java.util.Map<Integer, Long>> bySymbol = new java.util.HashMap<>();
+            for (java.util.Map<String, Object> row : jdbc.queryForList(sql)) {
+                String sym = (String) row.get("symbol");
+                Number mod  = (Number)  row.get("minute_of_day");
+                Number vol  = (Number)  row.get("avg_vol");
+                if (sym != null && mod != null && vol != null) {
+                    bySymbol.computeIfAbsent(sym, k -> new java.util.HashMap<>())
+                            .put(mod.intValue(), vol.longValue());
+                }
+            }
+            int loaded = 0;
+            for (java.util.Map.Entry<String, java.util.Map<Integer, Long>> e : bySymbol.entrySet()) {
+                stateRegistry.getOrCreate(e.getKey()).setAvgVolumeByMinute(e.getValue());
+                loaded++;
+            }
+            log.info("[AVG-VOL] Loaded per-minute same-time avg for {} symbols ({} minute rows)",
+                     loaded, bySymbol.values().stream().mapToInt(java.util.Map::size).sum());
+        } catch (Exception e) {
+            log.warn("[AVG-VOL] Per-minute load failed: {}", e.getMessage());
+        }
+
+        // --- Step 2: daily avg fallback from prices_daily (for symbols not in candle table) ---
+        try {
+            String sql = """
+                SELECT s.symbol, AVG(pd.volume)::bigint AS avg_vol
+                FROM prices_daily pd
+                JOIN stocks s ON s.id = pd.stock_id
+                WHERE pd.timestamp >= CURRENT_DATE - INTERVAL '25 days'
+                  AND pd.timestamp <  CURRENT_DATE
+                GROUP BY s.symbol
+                """;
+            int fallback = 0;
+            for (java.util.Map<String, Object> row : jdbc.queryForList(sql)) {
+                String sym = (String) row.get("symbol");
+                Long   vol = (Long)   row.get("avg_vol");
+                if (sym != null && vol != null && vol > 0) {
+                    stateRegistry.getOrCreate(sym).setAvgVolume20d(vol);
+                    fallback++;
+                }
+            }
+            log.info("[AVG-VOL] Loaded daily fallback avg for {} symbols", fallback);
+        } catch (Exception e) {
+            log.warn("[AVG-VOL] Daily fallback load failed: {}", e.getMessage());
+        }
     }
 
     /** 09:00 IST – pre-warm indicators from stored history, then connect WebSocket */
     @Scheduled(cron = "0 30 3 * * MON-FRI", zone = "UTC")
     public void connectWebSocket() {
         log.info("[SCHEDULER] 09:00 IST – warming indicators + connecting WebSocket");
+        loadAvgVolumes();  // load 20-day avg volume before ticks arrive
         if (auth.isAuthenticated()) {
             registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
             // Pre-warm IndicatorEngine from yesterday's stored bars so ATR/EMA/MACD
@@ -69,6 +145,28 @@ public class MarketScheduler {
             ticker.connect();
         } else {
             log.warn("[SCHEDULER] Cannot connect: Kite not authenticated");
+        }
+    }
+
+    /**
+     * On application startup: if KITE_ACCESS_TOKEN is already set in env/.env,
+     * auto-load avg volumes and connect the WebSocket immediately.
+     * This handles restarts during market hours without needing a manual auth call.
+     */
+    @EventListener(ApplicationStartedEvent.class)
+    public void onStartup() {
+        if (auth.isAuthenticated()) {
+            log.info("[STARTUP] Kite token found — auto-connecting WebSocket");
+            Thread.ofVirtual().start(() -> {
+                try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                loadAvgVolumes();
+                registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
+                ticker.connect();
+                try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                subscribeInstruments();
+            });
+        } else {
+            log.info("[STARTUP] No Kite token — waiting for manual auth via /api/kite/access-token");
         }
     }
 
@@ -119,10 +217,19 @@ public class MarketScheduler {
         eodService.saveEod();
     }
 
-    /** 15:35 IST – clear memory */
+    /** 15:35 IST – clear memory + purge old minute candles (keep 90 days) */
     @Scheduled(cron = "0 5 10 * * MON-FRI", zone = "UTC")
     public void cleanupMemory() {
         log.info("[SCHEDULER] 15:35 IST – clearing memory");
         eodService.cleanupMemory();
+        // Purge delta_minute_candle rows older than 90 days to cap storage at ~1.5 GB
+        try {
+            int deleted = jdbc.update(
+                "DELETE FROM delta_minute_candle WHERE trade_date < CURRENT_DATE - INTERVAL '90 days'"
+            );
+            if (deleted > 0) log.info("[CLEANUP] Purged {} old minute candle rows (>90 days)", deleted);
+        } catch (Exception e) {
+            log.warn("[CLEANUP] Minute candle purge failed: {}", e.getMessage());
+        }
     }
 }

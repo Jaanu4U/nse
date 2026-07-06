@@ -50,7 +50,7 @@ public class KiteTickerClient {
                 return t;
             });
     private ScheduledFuture<?> heartbeatFuture;
-    private final    ByteBuffer frameAccumulator = ByteBuffer.allocate(65536);
+    private final    ByteBuffer frameAccumulator = ByteBuffer.allocate(4194304); // 4MB — handles large burst packets for 500+ instruments
     private final    List<Integer> subscribedTokens = new CopyOnWriteArrayList<>();
 
     public KiteTickerClient(KiteProperties props,
@@ -124,14 +124,17 @@ public class KiteTickerClient {
 
                     @Override
                     public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
-                        // Accumulate partial frames
-                        frameAccumulator.put(data);
-                        if (last) {
-                            frameAccumulator.flip();
-                            byte[] bytes = new byte[frameAccumulator.limit()];
-                            frameAccumulator.get(bytes);
-                            frameAccumulator.clear();
-                            dispatchTicks(bytes);
+                        // Accumulate partial frames — synchronize because onBinary can be
+                        // called from multiple threads by the Java HTTP client
+                        synchronized (frameAccumulator) {
+                            frameAccumulator.put(data);
+                            if (last) {
+                                frameAccumulator.flip();
+                                byte[] bytes = new byte[frameAccumulator.limit()];
+                                frameAccumulator.get(bytes);
+                                frameAccumulator.clear();
+                                dispatchTicks(bytes);
+                            }
                         }
                         return null;
                     }

@@ -10,7 +10,8 @@ const DELTA_STREAM = process.env.NEXT_PUBLIC_DELTA_STREAM_URL || '/delta-stream'
 interface Stock {
   symbol: string; ltp: number; open: number; high: number; low: number;
   vwap: number; volume: number; buyVolume: number; sellVolume: number;
-  delta: number; cumulativeDelta: number; obi: number; rsi: number;
+  delta: number; cumulativeDelta: number; deltaStrength: number; volumeRatio: number; deltaPercent: number;
+  obi: number; rsi: number;
   ema20: number; ema50: number; atr14: number;
   macdLine: number; macdSignal: number; macdHist: number;
   bbUpper: number; bbLower: number; bbBandwidth: number;
@@ -165,14 +166,14 @@ export default function DeltaPage() {
       {/* ---- LIVE TAB ---- */}
       {tab === 'live' && (
         <div className="flex-1 overflow-auto p-4">
-          <table className="w-full text-3xs min-w-[900px]">
+          <table className="w-full text-3xs min-w-[1100px]">
             <thead className="sticky top-0 bg-slate-950/90">
               <tr>
                 <th className="text-left p-2 text-slate-500 font-semibold">Symbol</th>
                 {th('LTP','ltp','w-20')}
                 {th('VWAP','vwap','w-20')}
-                {th('Vol','volume','w-16')}
-                {th('Buy%','buyVolume','w-14')}
+                {th('ΔStrength%','deltaStrength','w-24')}
+                {th('Vol×','volumeRatio','w-16')}
                 {th('Delta','delta','w-20')}
                 {th('Cum Δ','cumulativeDelta','w-20')}
                 {th('OBI','obi','w-14')}
@@ -188,14 +189,22 @@ export default function DeltaPage() {
                 </td></tr>
               )}
               {filtered.map(s => {
-                const buyPct = s.volume > 0 ? s.buyVolume / s.volume * 100 : 0;
+                const ds = s.deltaStrength ?? 0;
+                const vr = s.volumeRatio ?? 1;
+                const aboveVwap = s.ltp > s.vwap;
                 return (
                   <tr key={s.symbol} className="border-t border-slate-800/40 hover:bg-slate-800/20">
                     <td className="p-2 font-bold text-slate-100">{s.symbol}</td>
                     <td className="p-2 text-right text-slate-100">₹{fmt(s.ltp)}</td>
-                    <td className={`p-2 text-right ${s.ltp > s.vwap ? 'text-emerald-400' : 'text-red-400'}`}>₹{fmt(s.vwap)}</td>
-                    <td className="p-2 text-right text-slate-400">{(s.volume/1000).toFixed(0)}K</td>
-                    <td className={`p-2 text-right ${buyPct > 55 ? 'text-emerald-400' : buyPct < 45 ? 'text-red-400' : 'text-slate-400'}`}>{buyPct.toFixed(0)}%</td>
+                    <td className={`p-2 text-right ${aboveVwap ? 'text-emerald-400' : 'text-red-400'}`}>₹{fmt(s.vwap)}</td>
+                    {/* Delta Strength — core Level 1 signal */}
+                    <td className={`p-2 text-right font-bold text-base ${
+                      ds > 10 ? 'text-emerald-300' : ds > 5 ? 'text-emerald-500' :
+                      ds > 0 ? 'text-emerald-700' : ds < -10 ? 'text-red-300' :
+                      ds < -5 ? 'text-red-500' : ds < 0 ? 'text-red-700' : 'text-slate-500'
+                    }`}>{ds >= 0 ? '+' : ''}{ds.toFixed(1)}%</td>
+                    {/* Volume Ratio */}
+                    <td className={`p-2 text-right ${vr >= 1.5 ? 'text-amber-400' : vr >= 1.0 ? 'text-slate-300' : 'text-slate-600'}`}>{vr.toFixed(1)}×</td>
                     <td className={`p-2 text-right font-bold ${s.delta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{s.delta >= 0 ? '+' : ''}{(s.delta/1000).toFixed(1)}K</td>
                     <td className={`p-2 text-right font-bold ${s.cumulativeDelta >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{s.cumulativeDelta >= 0 ? '+' : ''}{(s.cumulativeDelta/1000).toFixed(1)}K</td>
                     <td className={`p-2 text-right ${s.obi > 0.1 ? 'text-emerald-400' : s.obi < -0.1 ? 'text-red-400' : 'text-slate-500'}`}>{(s.obi*100).toFixed(1)}%</td>

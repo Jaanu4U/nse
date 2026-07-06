@@ -5,6 +5,10 @@ import com.nse.ingest.engine.IndicatorEngine;
 import com.nse.ingest.engine.LeeReadyClassifier;
 import com.nse.ingest.engine.RollingWindow;
 
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.StampedLock;
 
@@ -56,6 +60,8 @@ public class SymbolState {
     public final RollingWindow windowDay = new RollingWindow(375);
 
     private volatile long avgVolume20d = 0;
+    // Per-minute avg volume (key = IST minute-of-day 0-1439) from delta_minute_candle
+    private volatile Map<Integer, Long> avgVolumeByMinute = null;
 
     public SymbolState(String symbol) {
         this.symbol = symbol;
@@ -143,6 +149,68 @@ public class SymbolState {
     public long   getBestAskQty()     { return bestAskQty; }
     public long   getAvgVolume20d()   { return avgVolume20d; }
     public void   setAvgVolume20d(long v) { this.avgVolume20d = v; }
+    public void   setAvgVolumeByMinute(Map<Integer, Long> m) { this.avgVolumeByMinute = m; }
+
+    /**
+     * Returns the expected cumulative volume up to the current IST minute,
+     * by summing per-minute historical averages from 09:15 to now.
+     * Falls back to daily avg when no minute data available.
+     */
+    private long getAvgVolumeSameTime() {
+        Map<Integer, Long> m = avgVolumeByMinute;
+        if (m != null && !m.isEmpty()) {
+            int marketOpen = 9 * 60 + 15; // 09:15 IST = minute 555
+            int currentMin = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+                .toLocalTime().toSecondOfDay() / 60;
+            long cumulative = 0;
+            for (int min = marketOpen; min <= currentMin; min++) {
+                Long v = m.get(min);
+                if (v != null) cumulative += v;
+            }
+            if (cumulative > 0) return cumulative;
+        }
+        return avgVolume20d > 0 ? avgVolume20d : totalVolumeAdder.sum();
+    }
+
+    /**
+     * Delta Strength % = Current-minute Net Delta / 20-day Avg Same-Time-Minute Volume × 100
+     *
+     * Uses deltaRate (last 1-min net delta) vs per-minute historical avg — true same-time comparison.
+     * Falls back to (totalDelta / totalVolume × 100) when no historical data available.
+     */
+    public double getDeltaStrength() {
+        Map<Integer, Long> m = avgVolumeByMinute;
+        if (m != null && !m.isEmpty()) {
+            // Use last-minute net delta vs same-minute historical avg
+            long minuteDelta = deltaEngine.getDeltaRate(); // net delta last ~1 min
+            int minuteOfDay = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+                .toLocalTime().toSecondOfDay() / 60;
+            Long avgMinVol = m.get(minuteOfDay);
+            if (avgMinVol != null && avgMinVol > 0) {
+                return (double) minuteDelta / avgMinVol * 100.0;
+            }
+        }
+        // Fallback: use cumulative delta vs total volume (raw delta%)
+        long totalVol = totalVolumeAdder.sum();
+        if (totalVol == 0) return 0.0;
+        return (double) deltaEngine.getDelta() / totalVol * 100.0;
+    }
+
+    /** Volume Ratio = current minute volume pace vs 20-day avg same-time volume (1.0 = average) */
+    public double getVolumeRatio() {
+        long denom = getAvgVolumeSameTime();
+        if (denom <= 0) return 1.0;
+        // Compare today's total accumulated volume vs expected by this time of day
+        long totalVol = totalVolumeAdder.sum();
+        return totalVol > 0 ? (double) totalVol / denom : 1.0;
+    }
+
+    /** Delta % = net delta / total volume × 100 (raw imbalance quality) */
+    public double getDeltaPercent() {
+        long vol = totalVolumeAdder.sum();
+        if (vol == 0) return 0.0;
+        return (double) deltaEngine.getDelta() / vol * 100.0;
+    }
     public String getSymbol()         { return symbol; }
     public DeltaEngine     getDeltaEngine() { return deltaEngine; }
     public IndicatorEngine getIndicators()  { return indicators; }

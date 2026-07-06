@@ -159,6 +159,9 @@ public class MarketStreamController {
             m.put("sellVolume",     state.getDeltaEngine().getSellVolume());
             m.put("delta",          state.getDeltaEngine().getDelta());
             m.put("cumulativeDelta",state.getDeltaEngine().getCumulativeDelta());
+            m.put("deltaStrength",  round2(state.getDeltaStrength()));
+            m.put("volumeRatio",    round2(state.getVolumeRatio()));
+            m.put("deltaPercent",   round2(state.getDeltaPercent()));
             m.put("obi",            round4(state.getOrderBookImbalance()));
             m.put("rsi",            round2(state.getRsi()));
             m.put("ema20",          round2(ind.getEma20()));
