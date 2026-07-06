@@ -122,10 +122,12 @@ public class PredictionEngine {
         }
 
         // Expected Move % = deltaStrength * impactCoeff * confirmationMultiplier
+        // Only calculate when deltaStrength is meaningful (≥ 0.5% = active participation)
         double impactCoeff = state.getImpactCoeff();
         double expectedMove = 0.0;
-        if (impactCoeff != 0.0) {
-            double deltaStr = state.getDeltaStrength();
+        double deltaStrForMove = state.getDeltaStrength();
+        if (impactCoeff != 0.0 && Math.abs(deltaStrForMove) >= 0.5) {
+            double deltaStr = deltaStrForMove;
             // Confirmation multiplier: above VWAP & volume spike boost, below VWAP reduces
             double vwapMult = (state.getLtp() > state.getVwap() && state.getVwap() > 0) ? 1.15 : 0.75;
             double volMult  = state.getVolumeRatio() > 2.0 ? 1.30 : state.getVolumeRatio() > 1.5 ? 1.15 : 1.0;
