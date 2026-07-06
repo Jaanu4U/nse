@@ -215,6 +215,25 @@ def start_scheduler():
         id='evaluate_intraday_strategy_job'
     )
 
+    # 18:15 IST Mon-Fri — update regime context (VIX, expiry, gap day, Nifty trend)
+    def update_regime_job():
+        logger.info("[REGIME] Updating daily regime context...")
+        try:
+            from app.services.regime_service import update_regime_context
+            result = update_regime_context()
+            logger.info("[REGIME] Done: %s", result.get("regime_note", ""))
+        except Exception as e:
+            logger.error(f"[REGIME] Regime update failed: {e}")
+
+    scheduler.add_job(
+        update_regime_job,
+        'cron',
+        day_of_week='mon-fri',
+        hour=18,
+        minute=15,
+        id='update_regime_job'
+    )
+
     # Every Sunday 02:00 IST — retrain Level 2 (historical profiles) and Level 3
     # (XGBoost ML model) using the last 60 days of accumulated delta minute candles.
     # Keeps impact_coeff, up_prob, and ml_up_prob current as new data builds up.

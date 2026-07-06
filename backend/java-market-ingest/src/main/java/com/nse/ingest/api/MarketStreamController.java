@@ -183,6 +183,14 @@ public class MarketStreamController {
             m.put("expectedMove",        round4(state.getExpectedMove()));
             m.put("expectedTarget",      round2(state.getExpectedTarget()));
             m.put("absorption",          state.isAbsorption());
+            // Regime context (same for all symbols — today's market conditions)
+            var regime = com.nse.ingest.scheduler.MarketScheduler.REGIME;
+            m.put("vix",           round2(regime.getIndiaVix()));
+            m.put("vixLevel",      regime.getVixLevel());
+            m.put("isExpiryDay",   regime.isExpiryDay());
+            m.put("isGapDay",      regime.isGapDay());
+            m.put("niftyTrend",    regime.getNiftyTrend());
+            m.put("regimeNote",    regime.getRegimeNote());
             m.put("ts",                  LocalDateTime.now().toString());
             list.add(m);
         }

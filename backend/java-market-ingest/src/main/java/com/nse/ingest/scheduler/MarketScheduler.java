@@ -9,6 +9,7 @@ import com.nse.ingest.service.EodService;
 import com.nse.ingest.service.HistoricalDataLoader;
 import com.nse.ingest.service.MarketStateRegistry;
 import com.nse.ingest.service.MinuteCandleAggregator;
+import com.nse.ingest.service.RegimeContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationStartedEvent;
@@ -45,6 +46,9 @@ public class MarketScheduler {
     private final HistoricalDataLoader    histLoader;
     private final MarketStateRegistry     stateRegistry;
     private final JdbcTemplate            jdbc;
+
+    /** Singleton regime context — refreshed at startup and 09:00 IST */
+    public static final RegimeContext REGIME = new RegimeContext();
 
     public MarketScheduler(KiteTickerClient ticker,
                             KiteAuthService auth,
@@ -187,12 +191,47 @@ public class MarketScheduler {
         }
     }
 
+    /** Load today's regime context (VIX, expiry, gap day) from delta_regime_context */
+    public void loadRegimeContext() {
+        try {
+            String sql = """
+                SELECT india_vix, vix_percentile_20d, vix_level,
+                       is_expiry_day, expiry_type, is_gap_day, gap_pct,
+                       nifty_trend, regime_note
+                FROM delta_regime_context
+                WHERE trade_date = CURRENT_DATE
+                """;
+            var rows = jdbc.queryForList(sql);
+            if (rows.isEmpty()) {
+                log.info("[REGIME] No regime context for today — using defaults (Normal day)");
+                return;
+            }
+            var row = rows.get(0);
+            Number vix  = (Number) row.get("india_vix");
+            Number pct  = (Number) row.get("vix_percentile_20d");
+            Number gap  = (Number) row.get("gap_pct");
+            if (vix  != null) REGIME.setIndiaVix(vix.doubleValue());
+            if (pct  != null) REGIME.setVixPercentile(pct.doubleValue());
+            if (gap  != null) REGIME.setGapPct(gap.doubleValue());
+            REGIME.setVixLevel((String) row.get("vix_level"));
+            REGIME.setExpiryDay(Boolean.TRUE.equals(row.get("is_expiry_day")));
+            REGIME.setExpiryType((String) row.get("expiry_type"));
+            REGIME.setGapDay(Boolean.TRUE.equals(row.get("is_gap_day")));
+            REGIME.setNiftyTrend((String) row.get("nifty_trend"));
+            REGIME.setRegimeNote((String) row.get("regime_note"));
+            log.info("[REGIME] Loaded: {}", REGIME.getRegimeNote());
+        } catch (Exception e) {
+            log.warn("[REGIME] Regime context load failed: {}", e.getMessage());
+        }
+    }
+
     /** 09:00 IST – pre-warm indicators from stored history, then connect WebSocket */
     @Scheduled(cron = "0 30 3 * * MON-FRI", zone = "UTC")
     public void connectWebSocket() {
         log.info("[SCHEDULER] 09:00 IST – warming indicators + connecting WebSocket");
         loadAvgVolumes();  // load 20-day avg volume before ticks arrive
         loadProfiles();    // load L2/L3 profiles
+        loadRegimeContext(); // load today's VIX/expiry/gap regime
         if (auth.isAuthenticated()) {
             registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
             // Pre-warm IndicatorEngine from yesterday's stored bars so ATR/EMA/MACD
@@ -217,6 +256,7 @@ public class MarketScheduler {
                 try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
                 loadAvgVolumes();
                 loadProfiles();
+                loadRegimeContext();
                 registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
                 ticker.connect();
                 try { Thread.sleep(3000); } catch (InterruptedException ignored) {}

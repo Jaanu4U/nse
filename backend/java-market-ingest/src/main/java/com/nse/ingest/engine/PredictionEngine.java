@@ -2,6 +2,7 @@ package com.nse.ingest.engine;
 
 import com.nse.ingest.dto.PredictionResultDto;
 import com.nse.ingest.service.SymbolState;
+import com.nse.ingest.scheduler.MarketScheduler;
 import org.springframework.stereotype.Component;
 
 /**
@@ -139,6 +140,20 @@ public class PredictionEngine {
             expectedMove = state.getAvgMove15m() * Math.min(state.getVolumeRatio(), 2.0);
         }
         double expectedTarget = state.getLtp() > 0 ? state.getLtp() * (1 + expectedMove / 100.0) : 0.0;
+
+        // Apply regime confirmation multiplier (VIX level, expiry day, gap day)
+        var regime = MarketScheduler.REGIME;
+        double regimeMult = regime.getConfirmationMultiplier();
+        if (regimeMult != 1.0) {
+            expectedMove *= regimeMult;
+            expectedTarget = state.getLtp() > 0 ? state.getLtp() * (1 + expectedMove / 100.0) : 0.0;
+        }
+        // On hostile regime (high VIX + expiry/gap), also reduce blended score confidence
+        if (regime.isHostileRegime()) {
+            rawScore *= 0.80;
+            score = (rawScore + 1.0) / 2.0 * 100.0;
+            score = Math.max(0, Math.min(100, score));
+        }
 
         // Absorption detection: positive delta but price flat or falling
         boolean absorption = false;
