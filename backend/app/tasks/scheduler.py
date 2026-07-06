@@ -215,6 +215,34 @@ def start_scheduler():
         id='evaluate_intraday_strategy_job'
     )
 
+    # Every Sunday 02:00 IST — retrain Level 2 (historical profiles) and Level 3
+    # (XGBoost ML model) using the last 60 days of accumulated delta minute candles.
+    # Keeps impact_coeff, up_prob, and ml_up_prob current as new data builds up.
+    def retrain_delta_models_job():
+        logger.info("[DELTA-RETRAIN] Starting weekly Level 2 + Level 3 retraining...")
+        import subprocess, sys
+        try:
+            result = subprocess.run(
+                [sys.executable, "/workspace/train_delta_models.py", "--level", "all", "--days", "60"],
+                capture_output=True, text=True, timeout=1800  # 30 min max
+            )
+            if result.returncode == 0:
+                logger.info("[DELTA-RETRAIN] Level 2 + Level 3 retraining completed successfully.")
+            else:
+                logger.error(f"[DELTA-RETRAIN] Retraining failed:\n{result.stderr[-2000:]}")
+        except subprocess.TimeoutExpired:
+            logger.error("[DELTA-RETRAIN] Retraining timed out after 30 minutes.")
+        except Exception as e:
+            logger.error(f"[DELTA-RETRAIN] Retraining error: {e}")
+
+    scheduler.add_job(
+        retrain_delta_models_job,
+        'cron',
+        day_of_week='sun',
+        hour=2,
+        minute=0,
+        id='retrain_delta_models_job'
+    )
+
     scheduler.start()
     logger.info("APScheduler initialized and started successfully.")
-    return scheduler
