@@ -8,6 +8,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+
 import java.util.List;
 import java.util.Map;
 
@@ -89,6 +94,39 @@ public class HistoricalController {
         Thread.ofVirtual().start(() -> loader.warmIndicators(symbols));
         return ResponseEntity.accepted().body(Map.of(
             "message", "Warming indicators for " + symbols.size() + " symbols in background"
+        ));
+    }
+
+    /**
+     * POST /api/historical/replay-intraday?from=09:15&to=11:46
+     *
+     * Fetches today's missing minute candles from Kite for the gap window and:
+     *   1. Patches each SymbolState with accumulated volume, VWAP, and price
+     *   2. Persists the candles to delta_minute_candle for future avg-volume lookups
+     *
+     * Call this after a restart during market hours.
+     * 'from' defaults to market open (09:15 IST).
+     * 'to'   defaults to 5 minutes before now (give the live feed a head-start).
+     */
+    @PostMapping("/replay-intraday")
+    public ResponseEntity<Map<String, Object>> replayIntraday(
+            @RequestParam(defaultValue = "09:15") String from,
+            @RequestParam(defaultValue = "")      String to) {
+        ZoneId ist = ZoneId.of("Asia/Kolkata");
+        LocalDate today = LocalDate.now(ist);
+        DateTimeFormatter tf = DateTimeFormatter.ofPattern("HH:mm");
+        LocalDateTime fromDt = LocalDateTime.of(today, LocalTime.parse(from, tf));
+        LocalDateTime toDt   = to.isBlank()
+            ? LocalDateTime.now(ist).minusMinutes(5)
+            : LocalDateTime.of(today, LocalTime.parse(to, tf));
+
+        Thread.ofVirtual().start(() -> loader.replayIntradayGap(fromDt, toDt));
+        return ResponseEntity.accepted().body(Map.of(
+            "message",     "Intraday gap fill started",
+            "gap_from",    fromDt.toString(),
+            "gap_to",      toDt.toString(),
+            "symbols",     watchlist.count(),
+            "status_url",  "/api/historical/status"
         ));
     }
 }

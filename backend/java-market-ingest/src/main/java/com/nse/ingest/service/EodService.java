@@ -76,25 +76,51 @@ public class EodService {
             ds.setConfidenceScore(bd4(pred.confidenceScore()));
             summaries.add(ds);
 
-            PredictionHistory ph = new PredictionHistory();
-            ph.setSymbol(state.getSymbol());
-            ph.setTradeDate(today);
-            ph.setScoredAt(LocalDateTime.now());
-            ph.setPredictionScore(bd(pred.predictionScore()));
-            ph.setBullishProb(bd4(pred.bullishProbability()));
-            ph.setBearishProb(bd4(pred.bearishProbability()));
-            ph.setConfidenceScore(bd4(pred.confidenceScore()));
-            ph.setDeltaInput(state.getDeltaEngine().getDelta());
-            ph.setCumDeltaInput(state.getDeltaEngine().getCumulativeDelta());
-            ph.setVwapInput(bd(state.getVwap()));
-            ph.setVolumeInput(state.getTotalVolume());
-            ph.setRsiInput(bd4(state.getRsi()));
+            PredictionHistory ph = buildPredictionRow(state, pred, today);
             predictions.add(ph);
         }
 
         dailyRepo.saveAll(summaries);
         predRepo.saveAll(predictions);
         log.info("EOD save complete: {} symbols persisted", summaries.size());
+    }
+
+    /**
+     * Intraday prediction snapshot — persists one PredictionHistory row per
+     * active symbol.  Scheduled every 15 minutes during market hours so the
+     * EOD accuracy job can resolve 15-minute forward returns (a single
+     * snapshot at 15:31 close can never be resolved).
+     */
+    @Transactional
+    public void snapshotPredictions() {
+        LocalDate today = LocalDate.now();
+        List<PredictionHistory> predictions = new ArrayList<>(registry.symbolCount());
+        for (SymbolState state : registry.all()) {
+            if (state.getTotalVolume() == 0) continue;
+            PredictionResultDto pred = predEngine.score(state);
+            predictions.add(buildPredictionRow(state, pred, today));
+        }
+        if (!predictions.isEmpty()) {
+            predRepo.saveAll(predictions);
+            log.info("Prediction snapshot saved: {} symbols", predictions.size());
+        }
+    }
+
+    private PredictionHistory buildPredictionRow(SymbolState state, PredictionResultDto pred, LocalDate today) {
+        PredictionHistory ph = new PredictionHistory();
+        ph.setSymbol(state.getSymbol());
+        ph.setTradeDate(today);
+        ph.setScoredAt(LocalDateTime.now());
+        ph.setPredictionScore(bd(pred.predictionScore()));
+        ph.setBullishProb(bd4(pred.bullishProbability()));
+        ph.setBearishProb(bd4(pred.bearishProbability()));
+        ph.setConfidenceScore(bd4(pred.confidenceScore()));
+        ph.setDeltaInput(state.getDeltaEngine().getDelta());
+        ph.setCumDeltaInput(state.getDeltaEngine().getCumulativeDelta());
+        ph.setVwapInput(bd(state.getVwap()));
+        ph.setVolumeInput(state.getTotalVolume());
+        ph.setRsiInput(bd4(state.getRsi()));
+        return ph;
     }
 
     /** Called at 15:35 — clears all in-memory tick state. */

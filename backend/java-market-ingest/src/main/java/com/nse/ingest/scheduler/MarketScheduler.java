@@ -275,6 +275,9 @@ public class MarketScheduler {
      */
     @EventListener(ApplicationStartedEvent.class)
     public void onStartup() {
+        // Always rebuild today's in-memory state from stored minute candles so the
+        // dashboard shows data after any restart (even after market close / without Kite auth).
+        Thread.ofVirtual().start(histLoader::rehydrateFromDb);
         if (auth.isAuthenticated()) {
             log.info("[STARTUP] Kite token found — auto-connecting WebSocket");
             Thread.ofVirtual().start(() -> {
@@ -283,12 +286,39 @@ public class MarketScheduler {
                 loadProfiles();
                 loadRegimeContext();
                 registry.loadFromKite(auth.getAccessToken(), props.getApiKey());
+                // Warm EMA/ATR/MACD from stored daily bars (mid-day restart = cold indicators)
+                Thread.ofVirtual().start(() -> histLoader.warmIndicators(watchlist.activeSymbols()));
                 ticker.connect();
                 try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
                 subscribeInstruments();
+                autoGapFillIfMarketHours();
             });
         } else {
             log.info("[STARTUP] No Kite token — waiting for manual auth via /api/kite/access-token");
+        }
+    }
+
+    /**
+     * SELF-HEAL: if the app (re)starts during market hours, automatically replay
+     * today's missed minute candles from Kite so volume/VWAP/price state and
+     * delta_minute_candle are complete. No manual /replay-intraday call needed.
+     */
+    private void autoGapFillIfMarketHours() {
+        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(ist);
+        java.time.DayOfWeek dow = now.getDayOfWeek();
+        if (dow == java.time.DayOfWeek.SATURDAY || dow == java.time.DayOfWeek.SUNDAY) return;
+        java.time.LocalTime t = now.toLocalTime();
+        // Only relevant between 09:20 and 15:30 IST (before 09:20 there is nothing to fill)
+        if (t.isBefore(java.time.LocalTime.of(9, 20)) || t.isAfter(java.time.LocalTime.of(15, 30))) return;
+
+        java.time.LocalDateTime from = now.toLocalDate().atTime(9, 15);
+        java.time.LocalDateTime to   = now.toLocalDateTime().minusMinutes(2);
+        log.info("[STARTUP] Market hours restart detected — auto gap-filling {} → {}", from, to);
+        try {
+            histLoader.replayIntradayGap(from, to);
+        } catch (Exception e) {
+            log.error("[STARTUP] Auto gap-fill failed: {}", e.getMessage());
         }
     }
 
@@ -329,6 +359,48 @@ public class MarketScheduler {
         }
     }
 
+    /**
+     * ULTIMATE SELF-HEAL: every minute during market hours, verify real market
+     * data is flowing (not just that the socket says "connected").
+     * If no tick has been processed for FEED_STALE_SECONDS, force a full
+     * WebSocket reconnect + resubscribe. Two consecutive stale checks with a
+     * failed reconnect keep retrying each minute — no human needed.
+     */
+    private static final long FEED_STALE_SECONDS = 120;
+    private volatile long lastFeedRecoveryEpochMs = 0;
+
+    @Scheduled(cron = "30 * 3-9 * * MON-FRI", zone = "UTC")
+    public void feedWatchdog() {
+        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
+        java.time.LocalTime t = java.time.ZonedDateTime.now(ist).toLocalTime();
+        // Active window: 09:16–15:29 IST (skip the open/close boundary minutes)
+        if (t.isBefore(java.time.LocalTime.of(9, 16)) || t.isAfter(java.time.LocalTime.of(15, 29))) return;
+        if (!auth.isAuthenticated()) return; // token watchdog handles this case
+
+        long age = stateRegistry.lastTickAgeSeconds();
+        boolean neverTicked = age < 0;
+        boolean stale       = age >= FEED_STALE_SECONDS;
+        if (!neverTicked && !stale) return; // healthy
+
+        // Rate-limit recovery attempts to once per 2 minutes
+        long now = System.currentTimeMillis();
+        if (now - lastFeedRecoveryEpochMs < 120_000) return;
+        lastFeedRecoveryEpochMs = now;
+
+        log.warn("[FEED-WATCHDOG] Live feed stale (last tick {}s ago, connected={}) — forcing reconnect",
+                 neverTicked ? "never" : String.valueOf(age), ticker.isConnected());
+        try {
+            ticker.disconnect();
+            Thread.sleep(1500);
+            ticker.connect();
+            Thread.sleep(3000);
+            subscribeInstruments();
+            log.info("[FEED-WATCHDOG] Reconnect + resubscribe issued; will re-verify next minute");
+        } catch (Exception e) {
+            log.error("[FEED-WATCHDOG] Recovery attempt failed: {}", e.getMessage());
+        }
+    }
+
     /** 15:30 IST – freeze / stop ticker */
     @Scheduled(cron = "0 0 10 * * MON-FRI", zone = "UTC")
     public void freezeMarket() {
@@ -343,11 +415,35 @@ public class MarketScheduler {
         eodService.saveEod();
     }
 
-    /** 15:35 IST – clear memory + purge old minute candles (keep 90 days) */
+    /**
+     * Every 15 min, 09:30–15:15 IST – snapshot per-symbol predictions to
+     * delta_prediction_history so the backend EOD accuracy job can resolve
+     * 15-minute forward returns against minute candles.
+     */
+    @Scheduled(cron = "0 0,15,30,45 4-9 * * MON-FRI", zone = "UTC")
+    public void snapshotPredictions() {
+        try {
+            eodService.snapshotPredictions();
+        } catch (Exception e) {
+            log.error("[SNAPSHOT] Prediction snapshot failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 08:50 IST – clear yesterday's in-memory tick state before the new session.
+     * (Moved from 15:35 so the dashboard keeps showing the day's data all evening.)
+     */
+    @Scheduled(cron = "0 20 3 * * MON-FRI", zone = "UTC")
+    public void preOpenMemoryReset() {
+        log.info("[SCHEDULER] 08:50 IST – clearing yesterday's in-memory tick state");
+        eodService.cleanupMemory();
+    }
+
+    /** 15:35 IST – purge old minute candles (keep 90 days) */
     @Scheduled(cron = "0 5 10 * * MON-FRI", zone = "UTC")
     public void cleanupMemory() {
-        log.info("[SCHEDULER] 15:35 IST – clearing memory");
-        eodService.cleanupMemory();
+        // NOTE: in-memory state is intentionally KEPT after close so the dashboard
+        // still shows the day's data; it is cleared pre-open by preOpenMemoryReset().
         // Purge delta_minute_candle rows older than 90 days to cap storage at ~1.5 GB
         try {
             int deleted = jdbc.update(

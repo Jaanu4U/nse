@@ -193,9 +193,9 @@ def start_scheduler():
     scheduler.add_job(
         retrain_delta_models_job,
         'cron',
-        day_of_week='sun',
-        hour=2,
-        minute=0,
+        day_of_week='mon-fri',
+        hour=8,
+        minute=30,
         id='retrain_delta_models_job'
     )
 
@@ -257,9 +257,10 @@ def start_scheduler():
                     WITH resolved AS (
                         SELECT
                             ph.symbol,
-                            ph.signal,
+                            CASE WHEN ph.bullish_prob >= ph.bearish_prob THEN 'BULLISH'
+                                 ELSE 'BEARISH' END AS signal,
                             ph.prediction_score,
-                            ph.created_at,
+                            ph.scored_at,
                             -- 15-min forward return
                             CASE WHEN mc_now.close_price > 0
                                  THEN (mc_fwd.close_price - mc_now.close_price) / mc_now.close_price * 100
@@ -267,12 +268,12 @@ def start_scheduler():
                         FROM delta_prediction_history ph
                         JOIN delta_minute_candle mc_now
                           ON mc_now.symbol = ph.symbol
-                         AND mc_now.minute_ts = date_trunc('minute', ph.created_at)
+                         AND mc_now.minute_ts = date_trunc('minute', ph.scored_at AT TIME ZONE 'UTC')
                         JOIN delta_minute_candle mc_fwd
                           ON mc_fwd.symbol = ph.symbol
-                         AND mc_fwd.minute_ts = date_trunc('minute', ph.created_at) + INTERVAL '15 minutes'
-                        WHERE ph.created_at::date = %s
-                          AND ph.signal IN ('BULLISH', 'BEARISH')
+                         AND mc_fwd.minute_ts = date_trunc('minute', ph.scored_at AT TIME ZONE 'UTC') + INTERVAL '15 minutes'
+                        WHERE ph.scored_at::date = %s
+                          AND (ph.bullish_prob IS NOT NULL OR ph.bearish_prob IS NOT NULL)
                     ),
                     scored AS (
                         SELECT *,

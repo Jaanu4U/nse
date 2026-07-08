@@ -335,19 +335,41 @@ def build_level3(days=60):
     # Time-based 3-way split: train (0-75%), calibration (75-85%), test (85-100%)
     # M3 FIX: calibrate on a held-out calibration set, evaluate on a separate test set
     dates = sorted(df['trade_date'].unique())
-    cal_split_idx  = int(len(dates) * 0.75)
-    test_split_idx = int(len(dates) * 0.85)
-    cal_dates  = set(dates[cal_split_idx:test_split_idx])
-    test_dates = set(dates[test_split_idx:])
-    train_mask = ~df['trade_date'].isin(cal_dates | test_dates)
-    cal_mask   =  df['trade_date'].isin(cal_dates)
-    test_mask  =  df['trade_date'].isin(test_dates)
+    if len(dates) >= 5:
+        cal_split_idx  = int(len(dates) * 0.75)
+        test_split_idx = int(len(dates) * 0.85)
+        cal_dates  = set(dates[cal_split_idx:test_split_idx])
+        test_dates = set(dates[test_split_idx:])
+        train_mask = ~df['trade_date'].isin(cal_dates | test_dates)
+        cal_mask   =  df['trade_date'].isin(cal_dates)
+        test_mask  =  df['trade_date'].isin(test_dates)
+    else:
+        # Too few distinct trading days since the data epoch for a date-based
+        # split (would leave train/cal empty). Fall back to a time-ordered
+        # row split: first 75% train, next 10% calibration, last 15% test.
+        log.warning("Only %d distinct trade dates — using row-based 75/10/15 split", len(dates))
+        df_sorted_idx = df.sort_values(['trade_date', 'symbol']).index
+        n = len(df_sorted_idx)
+        train_idx = df_sorted_idx[: int(n * 0.75)]
+        cal_idx   = df_sorted_idx[int(n * 0.75): int(n * 0.85)]
+        test_idx  = df_sorted_idx[int(n * 0.85):]
+        train_mask = df.index.isin(train_idx)
+        cal_mask   = df.index.isin(cal_idx)
+        test_mask  = df.index.isin(test_idx)
 
     X_train, X_cal, X_test = X[train_mask], X[cal_mask], X[test_mask]
     y_train, y_cal, y_test = y_up[train_mask], y_up[cal_mask], y_up[test_mask]
 
     log.info("Train: %d rows | Cal: %d rows | Test: %d rows | Positive rate: %.1f%%",
              len(X_train), len(X_cal), len(X_test), y_up.mean() * 100)
+
+    # Guard: calibration requires both classes present in every split
+    if len(X_train) == 0 or len(X_cal) == 0 or len(X_test) == 0 \
+            or y_train.nunique() < 2 or y_cal.nunique() < 2:
+        log.warning("Split produced empty or single-class sets "
+                    "(train=%d, cal=%d, test=%d). Skipping Level 3 until more data accumulates.",
+                    len(X_train), len(X_cal), len(X_test))
+        return
 
     # Train XGBoost
     # M4 FIX: handle class imbalance (14.9% positive rate → scale_pos_weight ≈ 5.7)

@@ -223,15 +223,15 @@ class Financial(Base):
     id = Column(Integer, primary_key=True, index=True)
     stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
     fiscal_year = Column(Integer, nullable=False)
-    revenue = Column(Numeric(15, 2), nullable=True)
-    net_income = Column(Numeric(15, 2), nullable=True)
+    revenue = Column(Numeric(20, 2), nullable=True)
+    net_income = Column(Numeric(20, 2), nullable=True)
     eps = Column(Numeric(10, 2), nullable=True)
     pe = Column(Numeric(8, 2), nullable=True)
     pb = Column(Numeric(8, 2), nullable=True)
     roe = Column(Numeric(5, 2), nullable=True) # Percentage
     roce = Column(Numeric(5, 2), nullable=True) # Percentage
     debt_to_equity = Column(Numeric(8, 4), nullable=True)
-    free_cash_flow = Column(Numeric(15, 2), nullable=True)
+    free_cash_flow = Column(Numeric(20, 2), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     stock = relationship("Stock")
@@ -243,8 +243,8 @@ class QuarterlyResult(Base):
     id = Column(Integer, primary_key=True, index=True)
     stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
     quarter = Column(String(10), nullable=False) # '2025-Q1', '2025-Q2'
-    revenue = Column(Numeric(15, 2), nullable=True)
-    net_income = Column(Numeric(15, 2), nullable=True)
+    revenue = Column(Numeric(20, 2), nullable=True)
+    net_income = Column(Numeric(20, 2), nullable=True)
     eps = Column(Numeric(10, 2), nullable=True)
     operating_profit_margin = Column(Numeric(5, 2), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

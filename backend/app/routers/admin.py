@@ -10,6 +10,7 @@ import csv
 import io
 import logging
 import os
+import shutil
 import traceback
 from datetime import datetime, timedelta
 from typing import Optional
@@ -171,6 +172,127 @@ def get_db_stats(db: Session = Depends(get_db)):
         "tables": [
             {"name": r[0], "rows": r[1], "size": r[2]} for r in rows
         ],
+    }
+
+
+def _human_bytes(value: int | float | None) -> str:
+    if value is None:
+        return "0 B"
+    size = float(value)
+    units = ["B", "kB", "MB", "GB", "TB", "PB"]
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+
+
+def _disk_usage_for(path: str) -> dict:
+    usage = shutil.disk_usage(path)
+    total = int(usage.total)
+    used = int(usage.used)
+    free = int(usage.free)
+    return {
+        "path": path,
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
+        "total": _human_bytes(total),
+        "used": _human_bytes(used),
+        "free": _human_bytes(free),
+        "used_percent": round((used / total) * 100, 1) if total else 0,
+    }
+
+
+@router.get("/disk", dependencies=[Depends(admin_guard)])
+def get_disk_usage():
+    """Docker disk usage breakdown for the admin dashboard."""
+    try:
+        transport = httpx.HTTPTransport(uds="/var/run/docker.sock")
+        with httpx.Client(transport=transport, base_url="http://docker", timeout=5.0) as client:
+            resp = client.get("/system/df")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)[:180])
+
+    def summarize_usage(items, key: str = "Size"):
+        total = 0
+        reclaimable = 0
+        count = len(items or [])
+        for item in items or []:
+            total += int(item.get(key, 0) or 0)
+            usage = item.get("UsageData") or {}
+            reclaimable += int(usage.get("Size", 0) or 0) if item.get("InUse") is False else 0
+        return {
+            "count": count,
+            "size_bytes": total,
+            "size": _human_bytes(total),
+            "reclaimable_bytes": reclaimable,
+            "reclaimable": _human_bytes(reclaimable),
+        }
+
+    images = []
+    for img in data.get("Images", []):
+        size = int(img.get("Size", 0) or 0)
+        shared = int(img.get("SharedSize", 0) or 0)
+        images.append({
+            "repo_tags": ", ".join(img.get("RepoTags") or []) or "<none>",
+            "containers": img.get("Containers", 0),
+            "size_bytes": size,
+            "size": _human_bytes(size),
+            "shared_bytes": shared,
+            "shared_size": _human_bytes(shared),
+            "unique_bytes": max(size - shared, 0),
+            "unique_size": _human_bytes(max(size - shared, 0)),
+            "created": datetime.utcfromtimestamp(img.get("Created", 0)).isoformat() if img.get("Created") else None,
+        })
+    images.sort(key=lambda x: x["size_bytes"], reverse=True)
+
+    volumes = []
+    for vol in data.get("Volumes", []):
+        usage = vol.get("UsageData") or {}
+        size = int(usage.get("Size", 0) or 0)
+        volumes.append({
+            "name": vol.get("Name"),
+            "driver": vol.get("Driver"),
+            "ref_count": int(usage.get("RefCount", 0) or 0),
+            "size_bytes": size,
+            "size": _human_bytes(size),
+            "mountpoint": vol.get("Mountpoint"),
+        })
+    volumes.sort(key=lambda x: x["size_bytes"], reverse=True)
+
+    cache_items = []
+    for c in data.get("BuildCache", []):
+        size = int(c.get("Size", 0) or 0)
+        cache_items.append({
+            "id": c.get("ID"),
+            "type": c.get("Type"),
+            "description": c.get("Description") or "",
+            "in_use": bool(c.get("InUse", False)),
+            "shared": bool(c.get("Shared", False)),
+            "size_bytes": size,
+            "size": _human_bytes(size),
+            "usage_count": int(c.get("UsageCount", 0) or 0),
+            "created_at": c.get("CreatedAt"),
+            "last_used_at": c.get("LastUsedAt"),
+        })
+    cache_items.sort(key=lambda x: x["size_bytes"], reverse=True)
+
+    return {
+        "host_filesystems": [
+            _disk_usage_for("/"),
+            _disk_usage_for("/var/www/html/nse") if os.path.exists("/var/www/html/nse") else None,
+        ],
+        "layers_size_bytes": int(data.get("LayersSize", 0) or 0),
+        "layers_size": _human_bytes(int(data.get("LayersSize", 0) or 0)),
+        "images": summarize_usage(data.get("Images", [])),
+        "containers": summarize_usage(data.get("Containers", [])),
+        "volumes": summarize_usage(data.get("Volumes", [])),
+        "build_cache": summarize_usage(data.get("BuildCache", [])),
+        "top_images": images[:10],
+        "top_volumes": volumes[:10],
+        "top_build_cache": cache_items[:10],
     }
 
 

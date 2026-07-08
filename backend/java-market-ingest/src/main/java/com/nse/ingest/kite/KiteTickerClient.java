@@ -43,6 +43,8 @@ public class KiteTickerClient {
     private volatile WebSocket        ws;
     private final    AtomicBoolean    running    = new AtomicBoolean(false);
     private final    AtomicBoolean    connected  = new AtomicBoolean(false);
+    // Reuse a single HttpClient instance to avoid creating a new thread-pool on every reconnect
+    private final    HttpClient        httpClient = HttpClient.newHttpClient();
     private final    ScheduledExecutorService heartbeatExecutor =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "kite-heartbeat");
@@ -107,9 +109,8 @@ public class KiteTickerClient {
         try {
             String url = props.getWsUrl() + "?api_key=" + props.getApiKey()
                        + "&access_token=" + auth.getAccessToken();
-            HttpClient client = HttpClient.newHttpClient();
             int capturedAttempt = attempt;
-            ws = client.newWebSocketBuilder()
+            ws = httpClient.newWebSocketBuilder()
                 .buildAsync(URI.create(url), new WebSocket.Listener() {
 
                     @Override

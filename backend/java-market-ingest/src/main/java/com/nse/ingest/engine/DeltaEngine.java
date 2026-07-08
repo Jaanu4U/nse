@@ -27,6 +27,21 @@ public class DeltaEngine {
         maybeResetRate();
     }
 
+    /**
+     * Restore day-level delta state from DB aggregates after a restart.
+     * cumulativeDelta is the day counter and is always restored.
+     * buy/sell adders are PER-MINUTE counters (reset each flush) — fill them
+     * only when the market is closed (display-only; no flush will run), never
+     * during a live session where they'd corrupt the next minute candle.
+     */
+    public void rehydrate(long buyVol, long sellVol, boolean fillMinuteCounters) {
+        cumulativeDelta.addAndGet(buyVol - sellVol);
+        if (fillMinuteCounters) {
+            buyVolume.add(buyVol);
+            sellVolume.add(sellVol);
+        }
+    }
+
     /** Called every minute by the aggregator to capture and reset the rate. */
     public long snapshotAndResetRate() {
         long buy = buyVolume.sumThenReset();

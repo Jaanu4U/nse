@@ -38,6 +38,15 @@ public class MinuteCandleAggregator {
     /** Runs every minute during market hours (cron managed by MarketScheduler). */
     @Transactional
     public void flushMinuteCandles() {
+        // PERSIST WINDOW GUARD: the cron fires 03:00–10:59 UTC (08:30–16:29 IST)
+        // but candles must only be written for the live session. A flush at
+        // HH:mm captures the bar ending that minute, so the valid flush window
+        // is 09:16–15:31 IST (bars 09:15–15:30).
+        java.time.LocalTime istNow = java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata"));
+        if (istNow.isBefore(java.time.LocalTime.of(9, 16)) || istNow.isAfter(java.time.LocalTime.of(15, 31))) {
+            return;
+        }
+
         LocalDateTime now     = LocalDateTime.now();
         LocalDate     today   = now.toLocalDate();
         List<MinuteCandle> candles = new ArrayList<>(registry.symbolCount());

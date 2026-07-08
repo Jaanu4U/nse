@@ -34,6 +34,60 @@ interface DbStats {
   tables: DbTable[];
 }
 
+interface DiskEntry {
+  size: string;
+  size_bytes: number;
+  reclaimable?: string;
+  reclaimable_bytes?: number;
+  count: number;
+}
+
+interface DiskImage {
+  repo_tags: string;
+  containers: number;
+  size: string;
+  size_bytes: number;
+  shared_size: string;
+  unique_size: string;
+  created?: string | null;
+}
+
+interface DiskVolume {
+  name: string;
+  driver: string;
+  ref_count: number;
+  size: string;
+  mountpoint: string;
+}
+
+interface DiskCache {
+  id: string;
+  type: string;
+  description: string;
+  in_use: boolean;
+  shared: boolean;
+  size: string;
+  usage_count: number;
+}
+
+interface DiskStats {
+  host_filesystems: Array<{
+    path: string;
+    total: string;
+    used: string;
+    free: string;
+    used_percent: number;
+  } | null>;
+  layers_size: string;
+  images: DiskEntry;
+  containers: DiskEntry;
+  volumes: DiskEntry;
+  build_cache: DiskEntry;
+  top_images: DiskImage[];
+  top_volumes: DiskVolume[];
+  top_build_cache: DiskCache[];
+}
+
 interface ErrorEntry {
   id: number;
   level: 'ERROR' | 'WARNING';
@@ -166,11 +220,12 @@ export default function AdminPage() {
   const [token, setToken] = useState<string | null>(null);
   const [services, setServices] = useState<Services | null>(null);
   const [dbStats, setDbStats] = useState<DbStats | null>(null);
+  const [diskStats, setDiskStats] = useState<DiskStats | null>(null);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
   const [levelFilter, setLevelFilter] = useState<'ALL' | 'ERROR' | 'WARNING'>('ALL');
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState<'services' | 'db' | 'errors' | 'logs'>('services');
+  const [tab, setTab] = useState<'services' | 'db' | 'disk' | 'errors' | 'logs'>('services');
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   // Logs tab state
@@ -192,15 +247,17 @@ export default function AdminPage() {
     setRefreshing(true);
     try {
       const h = authHeader(tok);
-      const [svcRes, dbRes, errRes, statsRes] = await Promise.all([
+      const [svcRes, dbRes, diskRes, errRes, statsRes] = await Promise.all([
         fetch(`${API}/services`, { headers: h }),
         fetch(`${API}/db`, { headers: h }),
+        fetch(`${API}/disk`, { headers: h }),
         fetch(`${API}/errors?limit=300`, { headers: h }),
         fetch(`${API}/logs/stats`, { headers: h }),
       ]);
-      if (svcRes.status === 401 || dbRes.status === 401) { logout(); return; }
+      if (svcRes.status === 401 || dbRes.status === 401 || diskRes.status === 401) { logout(); return; }
       if (svcRes.ok)   setServices(await svcRes.json());
       if (dbRes.ok)    setDbStats(await dbRes.json());
+      if (diskRes.ok)  setDiskStats(await diskRes.json());
       if (errRes.ok)   setErrors(await errRes.json());
       if (statsRes.ok) setLogStats(await statsRes.json());
       setLastRefresh(new Date());
@@ -352,12 +409,12 @@ export default function AdminPage() {
 
         {/* Tabs */}
         <div className="flex gap-1 bg-slate-900/50 border border-slate-800 rounded-xl p-1 w-fit">
-          {(['services', 'db', 'errors', 'logs'] as const).map(t => (
+          {(['services', 'db', 'disk', 'errors', 'logs'] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors capitalize ${
                 tab === t ? 'bg-slate-800 text-slate-100' : 'text-slate-500 hover:text-slate-300'
               }`}>
-              {t === 'services' ? 'Services' : t === 'db' ? 'Database' : t === 'errors' ? `Errors (${errors.length})` : 'Logs'}
+              {t === 'services' ? 'Services' : t === 'db' ? 'Database' : t === 'disk' ? 'Disk' : t === 'errors' ? `Errors (${errors.length})` : 'Logs'}
             </button>
           ))}
         </div>
@@ -419,6 +476,151 @@ export default function AdminPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── Disk tab ── */}
+        {tab === 'disk' && diskStats && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[
+                { label: 'Docker Layers', value: diskStats.layers_size, sub: 'all image layers', color: 'text-sky-400' },
+                { label: 'Images', value: diskStats.images.size, sub: `${diskStats.images.count} images · ${diskStats.images.reclaimable ?? '0 B'} reclaimable`, color: 'text-emerald-400' },
+                { label: 'Volumes', value: diskStats.volumes.size, sub: `${diskStats.volumes.count} volumes · ${diskStats.volumes.reclaimable ?? '0 B'} reclaimable`, color: 'text-violet-400' },
+                { label: 'Build Cache', value: diskStats.build_cache.size, sub: `${diskStats.build_cache.count} records · ${diskStats.build_cache.reclaimable ?? '0 B'} reclaimable`, color: 'text-amber-400' },
+              ].map(card => (
+                <div key={card.label} className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                  <div className="text-xs text-slate-500">{card.label}</div>
+                  <div className={`mt-1 text-2xl font-bold ${card.color}`}>{card.value}</div>
+                  <div className="mt-1 text-xs text-slate-600">{card.sub}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-200">Host Filesystems</span>
+                <span className="text-xs text-slate-500">Overall disk usage on the server</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-800">
+                      <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">Path</th>
+                      <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Used</th>
+                      <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Free</th>
+                      <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Total</th>
+                      <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Used %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diskStats.host_filesystems.filter(Boolean).map(fs => (
+                      <tr key={fs!.path} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+                        <td className="px-5 py-2.5 text-xs text-slate-300 font-mono break-all">{fs!.path}</td>
+                        <td className="px-5 py-2.5 text-right text-slate-400">{fs!.used}</td>
+                        <td className="px-5 py-2.5 text-right text-slate-500">{fs!.free}</td>
+                        <td className="px-5 py-2.5 text-right text-slate-400">{fs!.total}</td>
+                        <td className="px-5 py-2.5 text-right text-slate-400">{fs!.used_percent}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-200">Largest Images</span>
+                  <span className="text-xs text-slate-500">Top 10 by size</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-800">
+                        <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">Image</th>
+                        <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Containers</th>
+                        <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Size</th>
+                        <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Unique</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diskStats.top_images.map(img => (
+                        <tr key={img.repo_tags} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+                          <td className="px-5 py-2.5 text-xs text-slate-300 font-mono break-all">
+                            <div>{img.repo_tags}</div>
+                            <div className="mt-1 text-[11px] text-slate-500">Created: {img.created ? fmt(img.created) : '—'}</div>
+                          </td>
+                          <td className="px-5 py-2.5 text-right text-slate-400">{img.containers}</td>
+                          <td className="px-5 py-2.5 text-right text-slate-400">{img.size}</td>
+                          <td className="px-5 py-2.5 text-right text-slate-500">{img.unique_size}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-200">Build Cache</span>
+                  <span className="text-xs text-slate-500">Top 10 by size</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-800">
+                        <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">ID</th>
+                        <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">Type</th>
+                        <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Size</th>
+                        <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Uses</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diskStats.top_build_cache.map(item => (
+                        <tr key={item.id} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+                          <td className="px-5 py-2.5 text-xs text-slate-300 font-mono break-all">{item.id}</td>
+                          <td className="px-5 py-2.5 text-xs text-slate-400">{item.type}{item.in_use ? ' · in use' : ''}</td>
+                          <td className="px-5 py-2.5 text-right text-slate-400">{item.size}</td>
+                          <td className="px-5 py-2.5 text-right text-slate-500">{item.usage_count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-200">Volumes</span>
+                <span className="text-xs text-slate-500">Mounted data and caches</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-800">
+                      <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">Name</th>
+                      <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">Driver</th>
+                      <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Refs</th>
+                      <th className="text-right px-5 py-2.5 text-xs text-slate-500 font-medium">Size</th>
+                      <th className="text-left px-5 py-2.5 text-xs text-slate-500 font-medium">Mountpoint</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diskStats.top_volumes.map(vol => (
+                      <tr key={vol.name} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+                        <td className="px-5 py-2.5 text-xs text-slate-300 font-mono break-all">{vol.name}</td>
+                        <td className="px-5 py-2.5 text-xs text-slate-400">{vol.driver}</td>
+                        <td className="px-5 py-2.5 text-right text-slate-400">{vol.ref_count}</td>
+                        <td className="px-5 py-2.5 text-right text-slate-400">{vol.size}</td>
+                        <td className="px-5 py-2.5 text-xs text-slate-500 font-mono break-all">{vol.mountpoint}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}

@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import nltk
 import logging
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.repositories.stock_repo import StockRepository
 from app.models.models import News
 import datetime
@@ -47,6 +48,7 @@ class SentimentAnalysisEngine:
             items = soup.find_all("item")
             
             new_articles = 0
+            seen_links = set()
             for item in items[:15]:  # Process the top 15 news headlines
                 title = item.title.text if item.title else ""
                 link = item.link.text if item.link else ""
@@ -54,11 +56,12 @@ class SentimentAnalysisEngine:
                 
                 if not title or not link:
                     continue
-                
-                # Check if news article already exists
-                exists = self.db.query(News).filter(News.url == link).first()
-                if exists:
+
+                # Google News RSS can repeat the same article across symbols or
+                # inside the same feed response. Treat URL as the idempotency key.
+                if link in seen_links:
                     continue
+                seen_links.add(link)
                 
                 # Parse publish date
                 try:
@@ -80,17 +83,18 @@ class SentimentAnalysisEngine:
                     sentiment_class = "NEUTRAL"
 
                 source = (item.source.text if item.source else "Google News") or "Google News"
-                new_news = News(
+                stmt = pg_insert(News).values(
                     stock_id=stock.id,
                     title=title[:500],
                     url=link[:1000],
                     source=source[:100],
                     published_at=published_at,
                     sentiment_score=compound_score,
-                    sentiment_class=sentiment_class
-                )
-                self.db.add(new_news)
-                new_articles += 1
+                    sentiment_class=sentiment_class,
+                ).on_conflict_do_nothing(index_elements=["url"])
+                result = self.db.execute(stmt)
+                if result.rowcount and result.rowcount > 0:
+                    new_articles += 1
                 
             if new_articles > 0:
                 self.db.commit()

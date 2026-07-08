@@ -75,10 +75,18 @@ public class MarketStreamController {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         String clientId = UUID.randomUUID().toString();
         // Store requested symbols as client metadata via name (hack-safe enough)
-        marketEmitters.put(clientId + "|" + (symbols != null ? symbols : "*"), emitter);
-        emitter.onCompletion(() -> marketEmitters.remove(clientId));
-        emitter.onTimeout(() -> marketEmitters.remove(clientId));
-        emitter.onError(e -> marketEmitters.remove(clientId));
+        String emitterKey = clientId + "|" + (symbols != null ? symbols : "*");
+        marketEmitters.put(emitterKey, emitter);
+        emitter.onCompletion(() -> marketEmitters.remove(emitterKey));
+        emitter.onTimeout(() -> marketEmitters.remove(emitterKey));
+        emitter.onError(e -> marketEmitters.remove(emitterKey));
+        scheduler.execute(() -> {
+            try {
+                emitter.send(SseEmitter.event().name("ready").data("connected"));
+            } catch (IOException ignored) {
+                // Let the normal completion/error callbacks remove the emitter.
+            }
+        });
         return emitter;
     }
 
@@ -93,6 +101,13 @@ public class MarketStreamController {
         emitter.onCompletion(() -> alertEmitters.remove(clientId));
         emitter.onTimeout(() -> alertEmitters.remove(clientId));
         emitter.onError(e -> alertEmitters.remove(clientId));
+        scheduler.execute(() -> {
+            try {
+                emitter.send(SseEmitter.event().name("ready").data("connected"));
+            } catch (IOException ignored) {
+                // Let the timeout/completion handlers clean up the emitter.
+            }
+        });
         return emitter;
     }
 

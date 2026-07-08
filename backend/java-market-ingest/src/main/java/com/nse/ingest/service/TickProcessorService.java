@@ -23,6 +23,13 @@ public class TickProcessorService {
 
     private static final Logger log = LoggerFactory.getLogger(TickProcessorService.class);
 
+    // Market-hours tick gate (IST). Ticks outside 09:15–15:30 are pre-open /
+    // post-close snapshots: they carry no depth, so LeeReady classifies 100%
+    // of the volume as BUY and poisons cumulative delta at the open.
+    private static final java.time.ZoneId    IST          = java.time.ZoneId.of("Asia/Kolkata");
+    private static final java.time.LocalTime MARKET_OPEN  = java.time.LocalTime.of(9, 15);
+    private static final java.time.LocalTime MARKET_CLOSE = java.time.LocalTime.of(15, 30);
+
     private final MarketStateRegistry registry;
     private final AlertEngine         alertEngine;
     private final Timer               tickTimer;
@@ -39,6 +46,10 @@ public class TickProcessorService {
     }
 
     public void process(TickDto tick) {
+        // Drop ticks outside live market hours (pre-open & post-close snapshots)
+        java.time.LocalTime nowIst = java.time.LocalTime.now(IST);
+        if (nowIst.isBefore(MARKET_OPEN) || nowIst.isAfter(MARKET_CLOSE)) return;
+
         Timer.Sample sample = Timer.start();
         try {
             SymbolState state = registry.getOrCreate(tick.symbol());
@@ -47,7 +58,7 @@ public class TickProcessorService {
                 tick.bestBidPrice(), tick.bestBidQty(),
                 tick.bestAskPrice(), tick.bestAskQty()
             );
-            registry.incrementTicks();
+            registry.recordTick(tick.symbol());
 
             // Evaluate alert rules against fresh state (all in-memory, ~10µs)
             IndicatorEngine ind = state.getIndicators();

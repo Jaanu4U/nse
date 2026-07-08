@@ -32,7 +32,9 @@ spring:
     table: delta_schema_history
   threads:
     virtual:
-      enabled: true
+      # Disabled: Spring Boot 3.2.x SseEmitter deadlocks when virtual threads
+      # are used with Tomcat async dispatch. Re-enable after upgrading to 3.3+.
+      enabled: false
 
 kite:
   api-key: ${KITE_API_KEY:}

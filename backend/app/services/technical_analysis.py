@@ -34,7 +34,9 @@ class TechnicalAnalysisEngine:
 
         # Fetch daily prices
         prices = self.price_repo.get_daily_prices(stock.id, start_date, end_date)
-        if len(prices) < 14:
+        # ADXIndicator(window=14) builds an internal array of size n-(window-1);
+        # it then accesses [window] = [14] so needs n - 13 > 14 → n >= 28.
+        if len(prices) < 28:
             logger.warning(f"Not enough prices to calculate indicators for {symbol} (only {len(prices)} candles).")
             return 0
 

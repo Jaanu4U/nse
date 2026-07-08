@@ -110,6 +110,15 @@ public class SymbolState {
                 tradedQty = lastQty;
             } else if (cumVolume >= prev) {
                 tradedQty = cumVolume - prev;
+                // CORRUPT-TICK GUARD: a ~1-second snapshot interval can never
+                // trade more than the 20-day average DAILY volume. Kite
+                // occasionally sends a corrupted cumulative volume (seen:
+                // GRANULES +3.08B shares in one tick, 2026-07-08). Adopt the
+                // new baseline but only credit the last trade's quantity.
+                long cap = Math.max(1_000_000L, avgVolume20d * 2);
+                if (tradedQty > cap) {
+                    tradedQty = lastQty;
+                }
             } else {
                 tradedQty = 0; // out-of-order snapshot, ignore
             }
@@ -332,6 +341,53 @@ public class SymbolState {
     public void setExpectedMove(double v)     { this.expectedMove = v; }
     public void setExpectedTarget(double v)   { this.expectedTarget = v; }
     public void setAbsorptionFlag(boolean v)  { this.absorptionFlag = v; }
+
+    /**
+     * Replay a historical minute bar to reconstruct today's intraday state
+     * after a system-downtime gap.  Updates volume, VWAP, and price state.
+     * Does NOT update delta/buy/sell (no historical split available).
+     */
+    public void replayIntradayGap(double o, double h, double l, double c, long vol) {
+        if (vol <= 0) return;
+        long stamp = lock.writeLock();
+        try {
+            if (Double.isNaN(open)) open = o;
+            if (h > high || Double.isInfinite(high)) high = h;
+            if (l < low  || Double.isInfinite(low))  low  = l;
+            close = c;
+            ltp   = c;
+            // Typical price VWAP contribution: (H + L + C) / 3
+            double typical = (h + l + c) / 3.0;
+            vwapNum += typical * vol;
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+        totalVolumeAdder.add(vol);
+    }
+
+    /**
+     * Rehydrate the full-day state from DB aggregates of delta_minute_candle.
+     * Called at startup so the dashboard shows the day's data after a restart
+     * (live rows carry the real buy/sell split, unlike Kite historical bars).
+     */
+    public void rehydrateDay(double o, double h, double l, double c,
+                             long vol, long buyVol, long sellVol, double vwapNumerator,
+                             boolean marketClosed) {
+        if (vol <= 0) return;
+        long stamp = lock.writeLock();
+        try {
+            if (Double.isNaN(open)) open = o;
+            if (h > high || Double.isInfinite(high)) high = h;
+            if (l < low  || Double.isInfinite(low))  low  = l;
+            close = c;
+            ltp   = c;
+            vwapNum += vwapNumerator;
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+        totalVolumeAdder.add(vol);
+        deltaEngine.rehydrate(buyVol, sellVol, marketClosed);
+    }
 
     /** Called at 15:35 — clear all intraday state. */
     public void reset() {

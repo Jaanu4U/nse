@@ -187,7 +187,7 @@ def notify_services(token: str):
     # 2. Restart the delta Docker container so it picks up the new .env token
     try:
         result = subprocess.run(
-            ["docker", "compose", "-f",
+            ["sudo", "-n", "docker", "compose", "-f",
              "/var/www/html/nse/docker-compose.yml",
              "restart", "delta"],
             capture_output=True, text=True, timeout=60

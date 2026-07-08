@@ -34,9 +34,11 @@ public class PaperTradeController {
 
         String sql = """
             SELECT id, trade_date, symbol, signal, status,
-                   entry_time AT TIME ZONE 'Asia/Kolkata' AS entry_ist,
+                    TO_CHAR(entry_time AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS') AS entry_ist,
                    entry_price,
-                   exit_time  AT TIME ZONE 'Asia/Kolkata' AS exit_ist,
+                    CASE WHEN exit_time IS NULL THEN NULL
+                        ELSE TO_CHAR(exit_time AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS')
+                    END AS exit_ist,
                    exit_price, qty,
                    ROUND(pnl, 2) AS pnl,
                    exit_reason,
@@ -45,7 +47,10 @@ public class PaperTradeController {
                    ROUND(ml_prob, 1) AS ml_prob,
                    ROUND(delta_strength, 2) AS delta_strength,
                    ROUND(expected_move, 3) AS expected_move,
-                   vix_level, is_expiry_day
+                   vix_level, is_expiry_day,
+                   ROUND(atr_entry, 2) AS atr_entry,
+                   ROUND(stop_price, 2) AS stop_price,
+                   ROUND(partial_pnl, 2) AS partial_pnl
             FROM delta_paper_trades
             WHERE trade_date = %s
             ORDER BY entry_time

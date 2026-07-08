@@ -83,6 +83,13 @@ services:
       # KITE_API_KEY, KITE_API_SECRET, KITE_ACCESS_TOKEN come from env_file above
     ports:
       - "8090:8090"
+    healthcheck:
+      # Restart the container automatically if the HTTP layer stops responding
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://localhost:8090/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
   postgres_data:

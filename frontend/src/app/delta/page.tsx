@@ -43,6 +43,7 @@ export default function DeltaPage() {
   const [paperDaily, setPaperDaily]   = useState<any[]>([]);
   const [paperStats, setPaperStats]   = useState<any>({});
   const [paperDate, setPaperDate]     = useState('today');
+  const [selectedTradeId, setSelectedTradeId] = useState<number|null>(null);
   const [search, setSearch]     = useState('');
   const [sortBy, setSortBy]     = useState<keyof Stock>('predScore');
   const [sortDesc, setSortDesc] = useState(true);
@@ -56,11 +57,15 @@ export default function DeltaPage() {
     const es = new EventSource(`${DELTA_STREAM}/market`);
     esRef.current = es;
 
+    es.onopen = () => {
+      setConnected(true);
+      setSvcError('');
+    };
+
     es.addEventListener('market', (e) => {
       try {
         const data: Stock[] = JSON.parse(e.data);
         setStocks(data);
-        setConnected(true);
         setSvcError('');
       } catch {}
     });
@@ -462,23 +467,143 @@ export default function DeltaPage() {
                   <tbody>
                     {paperTrades.map((t: any) => {
                       const pnl = parseFloat(t.pnl ?? 0);
+                      const isOpen = t.status === 'OPEN';
+                      const isExpanded = selectedTradeId === t.id;
+                      const entryTime = t.entry_ist ? t.entry_ist.split(' ')[1]?.slice(0,5) : '—';
+                      const exitTime = t.exit_ist ? t.exit_ist.split(' ')[1]?.slice(0,5) : '—';
+                      const holdMins = t.entry_ist && t.exit_ist
+                        ? Math.round((new Date(t.exit_ist.replace(' ','T')+'+05:30').getTime() - new Date(t.entry_ist.replace(' ','T')+'+05:30').getTime()) / 60000)
+                        : null;
+                      const priceMoveAmt = t.exit_price ? (parseFloat(t.exit_price) - parseFloat(t.entry_price)) : null;
+                      const priceMoveRatio = priceMoveAmt != null ? (priceMoveAmt / parseFloat(t.entry_price) * 100) : null;
+
+                      // Entry reason pills
+                      const entrySignals: {label:string; val:string; color:string; tip:string}[] = [
+                        { label:'Score', val:`${t.pred_score}`, color: parseFloat(t.pred_score)>=70 ? 'bg-emerald-900/60 text-emerald-300' : parseFloat(t.pred_score)>=65 ? 'bg-amber-900/60 text-amber-300' : 'bg-red-900/60 text-red-300', tip:'Composite signal score (0–100). ≥70 = strong, 65–70 = moderate' },
+                        { label:'Hist%', val:`${t.hist_prob}%`, color: parseFloat(t.hist_prob)>=55 ? 'bg-emerald-900/60 text-emerald-300' : parseFloat(t.hist_prob)>=50 ? 'bg-amber-900/60 text-amber-300' : 'bg-red-900/60 text-red-300', tip:'Historical win probability from similar past setups. ≥55% = bullish edge' },
+                        { label:'ML%', val:`${t.ml_prob}%`, color: parseFloat(t.ml_prob)>=30 ? 'bg-violet-900/60 text-violet-300' : parseFloat(t.ml_prob)>=20 ? 'bg-amber-900/60 text-amber-300' : 'bg-slate-800 text-slate-400', tip:'Machine learning model confidence. ≥30% = strong ML signal (note: uncalibrated raw output)' },
+                        { label:'Δ-Str', val:`${parseFloat(t.delta_strength??0).toFixed(1)}`, color: parseFloat(t.delta_strength)>=50 ? 'bg-cyan-900/60 text-cyan-300' : parseFloat(t.delta_strength)>=10 ? 'bg-amber-900/60 text-amber-300' : 'bg-slate-800 text-slate-400', tip:'Delta strength = net buy pressure (buy vol − sell vol normalised). Higher = more aggressive buying' },
+                        { label:'Exp.Move', val:`${parseFloat(t.expected_move??0).toFixed(3)}`, color: parseFloat(t.expected_move)>0 ? 'bg-emerald-900/60 text-emerald-300' : parseFloat(t.expected_move)<0 ? 'bg-red-900/60 text-red-300' : 'bg-slate-800 text-slate-400', tip:'Model-predicted price move direction (+ve=up, -ve=down). Used as directional bias at entry' },
+                        { label:'VIX', val:`${t.vix_level}`, color: t.vix_level==='NORMAL' ? 'bg-emerald-900/60 text-emerald-300' : t.vix_level==='HIGH' ? 'bg-amber-900/60 text-amber-300' : 'bg-red-900/60 text-red-300', tip:'Market volatility regime at time of entry. NORMAL = low fear, HIGH = caution, EXTREME = risky' },
+                        ...(t.is_expiry_day ? [{ label:'EXPIRY', val:'⚠', color:'bg-red-900/60 text-red-300', tip:'Expiry day — options pinning & extreme volatility can distort delta signals' }] : []),
+                      ];
+
+                      // Exit reason explanation
+                      const exitReasonMap: Record<string,{label:string;desc:string;color:string}> = {
+                        '30MIN_TARGET': { label:'30-Min Hold', desc:'Held for the full 30-minute window then exited at market price. No stop or target was hit — exit was time-based. (legacy rule)', color:'text-slate-300' },
+                        'TIME_EXIT':    { label:'Max Hold (60m)', desc:'Held for the maximum 60-minute window then exited at market price. Neither the ATR stop nor the ATR target was reached.', color:'text-slate-300' },
+                        'STOP_LOSS':    { label:'ATR Stop Loss', desc:'Price fell to entry − 1.5×ATR — the hard risk-control stop. Loss capped at the planned risk amount.', color:'text-red-400' },
+                        'BREAKEVEN_STOP': { label:'Breakeven Stop', desc:'After the partial profit was banked, the stop moved to entry price. Price came back and tagged it — remaining position exited flat, keeping the banked partial profit.', color:'text-amber-300' },
+                        'TRAIL_STOP':   { label:'Trailing Stop', desc:'Price ran in profit, the stop trailed 1×ATR below the high, and the pullback tagged it — locking in gains.', color:'text-emerald-300' },
+                        'TARGET':       { label:'Profit Target', desc:'Price reached entry + 2.5×ATR — the full profit target. Best-case exit.', color:'text-emerald-300' },
+                        'REVERSAL':     { label:'Reversal Stop', desc:'Signal flipped BEARISH (score ≤35) with confirmed selling pressure (negative 1-min delta) — engine cut the trade early.', color:'text-red-300' },
+                        'EOD':          { label:'End of Day', desc:'Market closing — all open paper trades force-exited at last available price.', color:'text-amber-300' },
+                        'ORPHANED_RESTART': { label:'Orphaned', desc:'Position left open across a restart from a previous day — closed flat at entry price.', color:'text-slate-500' },
+                      };
+                      const exitInfo = exitReasonMap[t.exit_reason] ?? { label: t.exit_reason ?? '—', desc: 'Unknown exit trigger.', color: 'text-slate-400' };
+
                       return (
-                        <tr key={t.id} className="border-t border-slate-800/40 hover:bg-slate-800/20">
-                          <td className="p-1.5 font-bold text-slate-100">{t.symbol}</td>
-                          <td className="p-1.5 text-right text-slate-400">{t.entry_ist ? new Date(t.entry_ist).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}) : '—'}</td>
-                          <td className="p-1.5 text-right text-slate-300">₹{parseFloat(t.entry_price ?? 0).toFixed(2)}</td>
-                          <td className="p-1.5 text-right text-slate-300">{t.exit_price ? `₹${parseFloat(t.exit_price).toFixed(2)}` : '—'}</td>
-                          <td className="p-1.5 text-right text-slate-500">{t.qty}</td>
-                          <td className={`p-1.5 text-right font-bold ${t.status === 'OPEN' ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {t.status === 'OPEN' ? 'OPEN' : `₹${pnl.toFixed(2)}`}
-                          </td>
-                          <td className="p-1.5 text-right text-slate-400">{t.pred_score}</td>
-                          <td className="p-1.5 text-right text-slate-400">{t.hist_prob}%</td>
-                          <td className="p-1.5 text-right text-slate-400">{t.ml_prob}%</td>
-                          <td className={`p-1.5 text-right ${parseFloat(t.delta_strength) > 5 ? 'text-emerald-400' : 'text-slate-400'}`}>{parseFloat(t.delta_strength ?? 0).toFixed(1)}%</td>
-                          <td className={`p-1.5 text-right text-3xs font-bold px-1 rounded ${t.status === 'OPEN' ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{t.status}</td>
-                          <td className="p-1.5 text-right text-slate-500">{t.exit_reason ?? '—'}</td>
-                        </tr>
+                        <React.Fragment key={t.id}>
+                          <tr
+                            className={`border-t border-slate-800/40 hover:bg-slate-800/30 cursor-pointer transition-colors ${isExpanded ? 'bg-slate-800/40' : ''}`}
+                            onClick={() => setSelectedTradeId(isExpanded ? null : t.id)}
+                          >
+                            <td className="p-1.5 font-bold text-slate-100">
+                              <span className={`mr-1 text-slate-600 text-3xs`}>{isExpanded ? '▲' : '▶'}</span>{t.symbol}
+                            </td>
+                            <td className="p-1.5 text-right text-slate-400">{t.entry_ist ?? '—'}</td>
+                            <td className="p-1.5 text-right text-slate-300">₹{parseFloat(t.entry_price ?? 0).toFixed(2)}</td>
+                            <td className="p-1.5 text-right text-slate-300">{t.exit_price ? `₹${parseFloat(t.exit_price).toFixed(2)}` : '—'}</td>
+                            <td className="p-1.5 text-right text-slate-500">{t.qty}</td>
+                            <td className={`p-1.5 text-right font-bold ${isOpen ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {isOpen ? 'OPEN' : `₹${pnl.toFixed(2)}`}
+                            </td>
+                            <td className="p-1.5 text-right text-slate-400">{t.pred_score}</td>
+                            <td className="p-1.5 text-right text-slate-400">{t.hist_prob}%</td>
+                            <td className="p-1.5 text-right text-slate-400">{t.ml_prob}%</td>
+                            <td className={`p-1.5 text-right ${parseFloat(t.delta_strength) > 5 ? 'text-emerald-400' : 'text-slate-400'}`}>{parseFloat(t.delta_strength ?? 0).toFixed(1)}%</td>
+                            <td className={`p-1.5 text-right text-3xs font-bold px-1 rounded ${isOpen ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{t.status}</td>
+                            <td className="p-1.5 text-right text-slate-500">{t.exit_reason ?? '—'}</td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="bg-slate-950/80 border-t border-slate-700/60">
+                              <td colSpan={12} className="px-4 py-3">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+
+                                  {/* WHY ENTRY */}
+                                  <div className="bg-slate-900/80 border border-slate-700/60 rounded-xl p-3">
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <span className="text-emerald-400 text-xs">▶ WHY ENTERED</span>
+                                      <span className="text-slate-500 text-3xs">{entryTime} IST</span>
+                                    </div>
+                                    <p className="text-3xs text-slate-400 mb-2 leading-relaxed">
+                                      All {entrySignals.length} entry conditions passed for <span className="text-white font-bold">{t.symbol}</span> at ₹{parseFloat(t.entry_price).toFixed(2)}.
+                                      The engine scanned live delta flow, scored this setup at <span className="text-amber-300">{t.pred_score}</span> and triggered a <span className="text-emerald-300">{t.signal}</span> paper trade.
+                                    </p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {entrySignals.map(s => (
+                                        <div key={s.label} className={`px-2 py-1 rounded-lg text-3xs font-mono ${s.color}`} title={s.tip}>
+                                          <span className="text-slate-500 mr-1">{s.label}:</span>{s.val}
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <div className="mt-2 grid grid-cols-2 gap-1.5 text-3xs">
+                                      {entrySignals.map(s => (
+                                        <div key={s.label+'-tip'} className="text-slate-500"><span className={`font-bold ${s.color.split(' ').pop()}`}>{s.label}</span> — {s.tip}</div>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  {/* WHY EXIT */}
+                                  <div className="bg-slate-900/80 border border-slate-700/60 rounded-xl p-3">
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <span className={`text-xs ${isOpen ? 'text-amber-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                        {isOpen ? '⏳ STILL OPEN' : `${pnl >= 0 ? '✓' : '✗'} WHY EXITED`}
+                                      </span>
+                                      {!isOpen && <span className="text-slate-500 text-3xs">{exitTime} IST{holdMins != null ? ` · held ${holdMins}m` : ''}</span>}
+                                    </div>
+                                    {!isOpen && (
+                                      <>
+                                        <div className={`inline-block px-2 py-0.5 rounded text-3xs font-bold mb-2 ${pnl>=0 ? 'bg-emerald-900/60 text-emerald-300' : 'bg-red-900/60 text-red-300'}`}>
+                                          {exitInfo.label}
+                                        </div>
+                                        <p className="text-3xs text-slate-400 leading-relaxed mb-2">{exitInfo.desc}</p>
+                                        {t.atr_entry != null && (
+                                          <p className="text-3xs text-slate-500 mb-2 font-mono">
+                                            Plan: Stop ₹{parseFloat(t.stop_price ?? 0).toFixed(2)} (1.5×ATR) · Target ₹{(parseFloat(t.entry_price) + 2.5*parseFloat(t.atr_entry)).toFixed(2)} (2.5×ATR) · ATR ₹{parseFloat(t.atr_entry).toFixed(2)}
+                                            {t.partial_pnl != null && <span className="text-emerald-400"> · Partial banked ₹{parseFloat(t.partial_pnl).toFixed(2)}</span>}
+                                          </p>
+                                        )}
+                                        <div className="grid grid-cols-3 gap-2 text-3xs">
+                                          <div className="bg-slate-800/60 rounded-lg p-2">
+                                            <div className="text-slate-500 mb-0.5">Price Move</div>
+                                            <div className={`font-bold ${priceMoveAmt != null && priceMoveAmt >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                                              {priceMoveAmt != null ? `${priceMoveAmt >= 0 ? '+' : ''}₹${priceMoveAmt.toFixed(2)}` : '—'}
+                                            </div>
+                                            <div className={`text-3xs ${priceMoveRatio != null && priceMoveRatio >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                                              {priceMoveRatio != null ? `${priceMoveRatio >= 0 ? '+' : ''}${priceMoveRatio.toFixed(3)}%` : ''}
+                                            </div>
+                                          </div>
+                                          <div className="bg-slate-800/60 rounded-lg p-2">
+                                            <div className="text-slate-500 mb-0.5">Hold Time</div>
+                                            <div className="font-bold text-slate-200">{holdMins != null ? `${holdMins} min` : '—'}</div>
+                                          </div>
+                                          <div className="bg-slate-800/60 rounded-lg p-2">
+                                            <div className="text-slate-500 mb-0.5">Final P&L</div>
+                                            <div className={`font-bold text-sm ${pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>₹{pnl.toFixed(2)}</div>
+                                            <div className="text-3xs text-slate-500">{t.qty} qty</div>
+                                          </div>
+                                        </div>
+                                      </>
+                                    )}
+                                    {isOpen && <p className="text-3xs text-amber-300/70">Trade is still running. Exit triggers: ATR stop-loss, trailing stop, 2.5×ATR target, 60-min max hold, reversal, or EOD (15:20).</p>}
+                                  </div>
+
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       );
                     })}
                   </tbody>
